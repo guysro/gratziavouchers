@@ -20,7 +20,7 @@ export default function PurchasePage() {
     <main className="voucher-app" dir="rtl">
       <div className="voucher-container">
         <BrandHeader
-          title="שוברי מתנה גרציה"
+          title="שוברי מתנה גרציא"
           description="רכישת שובר מתנה דיגיטלי בכמה צעדים פשוטים"
         />
 

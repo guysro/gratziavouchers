@@ -9,7 +9,7 @@ export default function VoucherTicket({ voucher }: VoucherTicketProps) {
   return (
     <div className="voucher-ticket">
       <div className="voucher-ticket-brand">
-        <span>שובר מתנה גרציה</span>
+        <span>שובר מתנה גרציא</span>
         <span className="voucher-ticket-code" dir="ltr">
           {voucher.voucherCode}
         </span>

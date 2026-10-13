@@ -12,7 +12,7 @@ export default function BrandHeader({
       <img
         className="brand-logo"
         src="/logo.jpg"
-        alt="גרציה מתנות ואירועים"
+        alt="גרציא מתנות ואירועים"
       />
       <h1>{title}</h1>
       <p>{description}</p>

@@ -18,6 +18,6 @@ Open `/admin` to sign in with `ADMIN_PASSWORD`. Search by customer name, phone, 
 
 ## Production
 
-Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV=live`, `MONGODB_URI`, `ADMIN_PASSWORD`, and `PORT` in the server environment. Run `npm run build`, then `npm start`; Express serves the built app and handles the API on the same origin. Serve production over HTTPS so the admin session cookie is marked Secure.
+Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV=live`, `MONGODB_URI`, `ADMIN_PASSWORD`, and `PORT` in the server environment. Run `npm run build`, then `npm start`; Express serves the built app and handles the API on the same origin. The admin session cookie is Secure by default and is sent only over HTTPS. For local HTTP development only, set `NODE_ENV=development`. Serve production over HTTPS.
 
 The API creates PayPal checkout orders in ILS without saving purchase records before payment. It returns a short-lived server-signed token binding the expected amount and recipient details to the PayPal order. After PayPal confirms the captured amount and currency, the server generates a voucher code and saves the paid voucher in the `vouchers` MongoDB collection. A unique index on the PayPal order ID prevents duplicate vouchers if capture is retried.

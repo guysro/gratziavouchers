@@ -22,6 +22,7 @@ const paypalClientId = process.env.PAYPAL_CLIENT_ID?.trim();
 const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET?.trim();
 const mongoUri = process.env.MONGODB_URI?.trim();
 const adminPassword = process.env.ADMIN_PASSWORD ?? "";
+const adminCookieSecure = process.env.NODE_ENV !== "development";
 const adminSessionSecret = randomBytes(32);
 const mongoDnsServers = process.env.MONGODB_DNS_SERVERS
   ?.split(",")
@@ -412,7 +413,7 @@ app.post("/api/paypal/orders", async (request, response) => {
         },
         purchase_units: [
           {
-            description: "שובר מתנה גרציה",
+            description: "שובר מתנה גרציא",
             amount: {
               currency_code: "ILS",
               value: (amountCents / 100).toFixed(2),
@@ -533,7 +534,7 @@ app.post("/api/admin/login", (request, response) => {
     "Path=/api/admin",
     `Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`,
   ];
-  if (process.env.NODE_ENV === "production") cookie.push("Secure");
+  if (adminCookieSecure) cookie.push("Secure");
   response.setHeader("Set-Cookie", cookie.join("; "));
   return response.json({ authenticated: true });
 });
@@ -541,7 +542,7 @@ app.post("/api/admin/login", (request, response) => {
 app.post("/api/admin/logout", (_request, response) => {
   const cookie =
     "gratzia_admin=; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=0" +
-    (process.env.NODE_ENV === "production" ? "; Secure" : "");
+    (adminCookieSecure ? "; Secure" : "");
   response.setHeader("Set-Cookie", cookie);
   return response.json({ authenticated: false });
 });
@@ -674,7 +675,7 @@ app.post("/api/admin/login", async (request, response) => {
     "Path=/api/admin",
     `Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`,
   ];
-  if (process.env.NODE_ENV === "production") cookieParts.push("Secure");
+  if (adminCookieSecure) cookieParts.push("Secure");
   response.setHeader("Set-Cookie", cookieParts.join("; "));
   return response.json({ authenticated: true });
 });
@@ -683,7 +684,7 @@ app.post("/api/admin/logout", (_request, response) => {
   response.setHeader(
     "Set-Cookie",
     "gratzia_admin=; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=0" +
-      (process.env.NODE_ENV === "production" ? "; Secure" : ""),
+      (adminCookieSecure ? "; Secure" : ""),
   );
   return response.json({ authenticated: false });
 });
