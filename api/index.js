@@ -28,11 +28,25 @@ const adminSessionSecretConfigured =
 const adminCookieSecure = process.env.NODE_ENV !== "development";
 const adminSessionSecret =
   configuredAdminSessionSecret ?? randomBytes(32).toString("base64url");
+const isProductionEnvironment =
+  process.env.VERCEL_ENV !== undefined
+    ? process.env.VERCEL_ENV === "production"
+    : process.env.NODE_ENV === "production";
+const mongoCollectionName = isProductionEnvironment
+  ? process.env.MONGODB_COLLECTION_PRODUCTION?.trim() || "vouchers"
+  : process.env.MONGODB_COLLECTION_DEVELOPMENT?.trim() || "vouchers_dev";
 const mongoDnsServers = process.env.MONGODB_DNS_SERVERS?.split(",")
   .map((server) => server.trim())
   .filter(Boolean);
 if (mongoDnsServers?.length) dns.setServers(mongoDnsServers);
 const mongoDatabaseName = getMongoDatabaseName(mongoUri);
+if (
+  mongoCollectionName.length > 120 ||
+  mongoCollectionName.includes("\0") ||
+  mongoCollectionName.startsWith("system.")
+) {
+  throw new Error("Invalid MongoDB collection name.");
+}
 const paypalConfigured = Boolean(
   paypalClientId &&
   paypalClientSecret &&
@@ -878,7 +892,7 @@ async function initializeMongo() {
       await mongoClient.connect();
       const collection = mongoClient
         .db(mongoDatabaseName)
-        .collection("vouchers");
+        .collection(mongoCollectionName);
       await collection.createIndex(
         { paypalOrderId: 1 },
         { unique: true, name: "unique_paypal_order" },
