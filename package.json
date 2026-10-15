@@ -5,12 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"npm:server:dev\" \"npm:client:dev\"",
-    "server:dev": "node --watch server/index.js",
+    "server:dev": "node --watch api/index.js",
     "client:dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "start": "node server/index.js"
+    "start": "node api/index.js"
   },
   "dependencies": {
     "@paypal/react-paypal-js": "^10.6.0",

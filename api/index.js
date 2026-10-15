@@ -22,10 +22,13 @@ const paypalClientId = process.env.PAYPAL_CLIENT_ID?.trim();
 const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET?.trim();
 const mongoUri = process.env.MONGODB_URI?.trim();
 const adminPassword = process.env.ADMIN_PASSWORD ?? "";
+const configuredAdminSessionSecret = process.env.ADMIN_SESSION_SECRET?.trim();
+const adminSessionSecretConfigured =
+  process.env.VERCEL !== "1" || Boolean(configuredAdminSessionSecret);
 const adminCookieSecure = process.env.NODE_ENV !== "development";
-const adminSessionSecret = randomBytes(32);
-const mongoDnsServers = process.env.MONGODB_DNS_SERVERS
-  ?.split(",")
+const adminSessionSecret =
+  configuredAdminSessionSecret ?? randomBytes(32).toString("base64url");
+const mongoDnsServers = process.env.MONGODB_DNS_SERVERS?.split(",")
   .map((server) => server.trim())
   .filter(Boolean);
 if (mongoDnsServers?.length) dns.setServers(mongoDnsServers);
@@ -47,6 +50,7 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDirectory = path.resolve(dirname, "..", "dist");
 const mongoClient = mongoUri ? new MongoClient(mongoUri) : null;
 let vouchersCollection;
+let mongoInitialization;
 
 function getMongoDatabaseName(uri) {
   if (!uri) return "gratzia_vouchers";
@@ -87,6 +91,14 @@ app.use(
     legacyHeaders: false,
   }),
 );
+app.use(async (_request, _response, next) => {
+  try {
+    await initializeMongo();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 function sendPaymentUnavailable(response) {
   return response.status(503).json({
@@ -127,7 +139,9 @@ function isValidAdminSession(token) {
   }
 
   try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const claims = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8"),
+    );
     return Number.isInteger(claims.expiresAt) && claims.expiresAt > Date.now();
   } catch {
     return false;
@@ -146,7 +160,11 @@ function getCookie(request, name) {
 }
 
 function requireAdmin(request, response, next) {
-  if (adminPassword.length < 16 || !mongoClient) {
+  if (
+    adminPassword.length < 16 ||
+    !mongoClient ||
+    !adminSessionSecretConfigured
+  ) {
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
   if (!isValidAdminSession(getCookie(request, "gratzia_admin"))) {
@@ -219,7 +237,10 @@ function getVerifiedCapture(order, expectedCents) {
   if (order?.status !== "COMPLETED") {
     return null;
   }
-  if (!Array.isArray(order.purchase_units) || order.purchase_units.length !== 1) {
+  if (
+    !Array.isArray(order.purchase_units) ||
+    order.purchase_units.length !== 1
+  ) {
     return null;
   }
   const captures = order.purchase_units[0]?.payments?.captures;
@@ -455,11 +476,7 @@ app.post("/api/paypal/orders/:orderId/capture", async (request, response) => {
 
   const claims = verifyOrderToken(orderId, request.body?.verificationToken);
   const purchase = normalizePurchase(request.body?.purchase);
-  if (
-    !claims ||
-    !purchase ||
-    hashPurchase(purchase) !== claims.purchaseHash
-  ) {
+  if (!claims || !purchase || hashPurchase(purchase) !== claims.purchaseHash) {
     return sendPaymentUnavailable(response);
   }
 
@@ -513,7 +530,11 @@ app.post("/api/paypal/orders/:orderId/capture", async (request, response) => {
 });
 
 app.post("/api/admin/login", (request, response) => {
-  if (adminPassword.length < 16 || !mongoClient) {
+  if (
+    adminPassword.length < 16 ||
+    !mongoClient ||
+    !adminSessionSecretConfigured
+  ) {
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
   const password = request.body?.password;
@@ -548,7 +569,11 @@ app.post("/api/admin/logout", (_request, response) => {
 });
 
 app.get("/api/admin/session", (request, response) => {
-  if (adminPassword.length < 16 || !mongoClient) {
+  if (
+    adminPassword.length < 16 ||
+    !mongoClient ||
+    !adminSessionSecretConfigured
+  ) {
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
   return response.json({
@@ -557,7 +582,8 @@ app.get("/api/admin/session", (request, response) => {
 });
 
 app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
-  const search = typeof request.query.q === "string" ? request.query.q.trim() : "";
+  const search =
+    typeof request.query.q === "string" ? request.query.q.trim() : "";
   if (search.length > 100) {
     return response.status(400).json({ error: "החיפוש ארוך מדי." });
   }
@@ -619,7 +645,8 @@ app.patch(
           { voucherCode },
           { projection: { status: 1 } },
         );
-        if (!existing) return response.status(404).json({ error: "השובר לא נמצא." });
+        if (!existing)
+          return response.status(404).json({ error: "השובר לא נמצא." });
         return response.status(409).json({ error: "השובר כבר מומש." });
       }
 
@@ -643,18 +670,23 @@ app.patch(
       return response.json({ voucher });
     } catch (error) {
       console.error("Admin voucher redemption failed.", error?.name ?? "Error");
-      return response.status(500).json({ error: "לא ניתן לממש את השובר כרגע." });
+      return response
+        .status(500)
+        .json({ error: "לא ניתן לממש את השובר כרגע." });
     }
   },
 );
 
 app.post("/api/admin/login", async (request, response) => {
-  if (adminPassword.length < 16) {
+  if (adminPassword.length < 16 || !adminSessionSecretConfigured) {
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
 
   const submittedPassword = request.body?.password;
-  if (typeof submittedPassword !== "string" || submittedPassword.length > 1024) {
+  if (
+    typeof submittedPassword !== "string" ||
+    submittedPassword.length > 1024
+  ) {
     return response.status(400).json({ error: "פרטי ההתחברות אינם תקינים." });
   }
 
@@ -690,7 +722,11 @@ app.post("/api/admin/logout", (_request, response) => {
 });
 
 app.get("/api/admin/session", (request, response) => {
-  if (adminPassword.length < 16 || !mongoClient) {
+  if (
+    adminPassword.length < 16 ||
+    !mongoClient ||
+    !adminSessionSecretConfigured
+  ) {
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
   return response.json({
@@ -699,7 +735,8 @@ app.get("/api/admin/session", (request, response) => {
 });
 
 app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
-  const search = typeof request.query.q === "string" ? request.query.q.trim() : "";
+  const search =
+    typeof request.query.q === "string" ? request.query.q.trim() : "";
   if (search.length > 100) {
     return response.status(400).json({ error: "החיפוש ארוך מדי." });
   }
@@ -787,7 +824,9 @@ app.patch(
       return response.json({ voucher });
     } catch (error) {
       console.error("Admin voucher redemption failed.", error?.name ?? "Error");
-      return response.status(500).json({ error: "לא ניתן לממש את השובר כרגע." });
+      return response
+        .status(500)
+        .json({ error: "לא ניתן לממש את השובר כרגע." });
     }
   },
 );
@@ -796,16 +835,18 @@ app.use("/api", (_request, response) =>
   response.status(404).json({ error: "לא נמצא." }),
 );
 
-app.use(express.static(distDirectory));
-app.use(async (request, response, next) => {
-  if (request.method !== "GET") return next();
-  try {
-    const indexHtml = await readFile(path.join(distDirectory, "index.html"));
-    return response.type("html").send(indexHtml);
-  } catch {
-    return next();
-  }
-});
+if (process.env.VERCEL !== "1") {
+  app.use(express.static(distDirectory));
+  app.use(async (request, response, next) => {
+    if (request.method !== "GET") return next();
+    try {
+      const indexHtml = await readFile(path.join(distDirectory, "index.html"));
+      return response.type("html").send(indexHtml);
+    } catch {
+      return next();
+    }
+  });
+}
 
 app.use((error, _request, response, _next) => {
   if (error instanceof SyntaxError && "body" in error) {
@@ -820,32 +861,59 @@ async function startServer() {
     throw new Error("MONGODB_URI is required.");
   }
 
-  await mongoClient.connect();
-  vouchersCollection = mongoClient
-    .db(mongoDatabaseName)
-    .collection("vouchers");
-  await vouchersCollection.createIndex(
-    { paypalOrderId: 1 },
-    { unique: true, name: "unique_paypal_order" },
-  );
-  await vouchersCollection.createIndex(
-    { voucherCode: 1 },
-    { unique: true, name: "unique_voucher_code" },
-  );
+  await initializeMongo();
 
   app.listen(port, () => {
     console.log(`Voucher server listening on port ${port}`);
   });
 }
 
-startServer().catch(async (error) => {
-  const errorName =
-    error && typeof error.name === "string" ? error.name : "Error";
-  const errorMessage =
-    error && typeof error.message === "string"
-      ? error.message.replace(/mongodb(?:\+srv)?:\/\/[^\s"'`]+/gi, "[redacted URI]")
-      : "Unknown startup error";
-  console.error(`Server startup failed (${errorName}): ${errorMessage}`);
-  if (mongoClient) await mongoClient.close().catch(() => {});
-  process.exitCode = 1;
-});
+async function initializeMongo() {
+  if (!mongoClient) {
+    throw new Error("MONGODB_URI is required.");
+  }
+
+  if (!mongoInitialization) {
+    mongoInitialization = (async () => {
+      await mongoClient.connect();
+      const collection = mongoClient
+        .db(mongoDatabaseName)
+        .collection("vouchers");
+      await collection.createIndex(
+        { paypalOrderId: 1 },
+        { unique: true, name: "unique_paypal_order" },
+      );
+      await collection.createIndex(
+        { voucherCode: 1 },
+        { unique: true, name: "unique_voucher_code" },
+      );
+      return collection;
+    })();
+  }
+
+  try {
+    vouchersCollection = await mongoInitialization;
+  } catch (error) {
+    mongoInitialization = undefined;
+    throw error;
+  }
+}
+
+export default app;
+
+if (process.env.VERCEL !== "1") {
+  startServer().catch(async (error) => {
+    const errorName =
+      error && typeof error.name === "string" ? error.name : "Error";
+    const errorMessage =
+      error && typeof error.message === "string"
+        ? error.message.replace(
+            /mongodb(?:\+srv)?:\/\/[^\s"'`]+/gi,
+            "[redacted URI]",
+          )
+        : "Unknown startup error";
+    console.error(`Server startup failed (${errorName}): ${errorMessage}`);
+    if (mongoClient) await mongoClient.close().catch(() => {});
+    process.exitCode = 1;
+  });
+}
