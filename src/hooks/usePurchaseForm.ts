@@ -20,31 +20,31 @@ export default function usePurchaseForm() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const validate = (): boolean => {
+  const getValidationErrors = (data: FormData): FormErrors => {
     const newErrors: FormErrors = {};
 
-    if (!formData.name.trim()) {
+    if (!data.name.trim()) {
       newErrors.name = "יש להזין שם מלא";
-    } else if (formData.name.trim().length < 2) {
+    } else if (data.name.trim().length < 2) {
       newErrors.name = "השם חייב להכיל לפחות שני תווים";
     }
 
-    const phoneDigits = formData.phone.replace(/\D/g, "");
-    if (!formData.phone.trim()) {
+    const phoneDigits = data.phone.replace(/\D/g, "");
+    if (!data.phone.trim()) {
       newErrors.phone = "יש להזין מספר טלפון";
     } else if (phoneDigits.length < 7 || phoneDigits.length > 15) {
       newErrors.phone = "יש להזין מספר טלפון תקין";
     }
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!formData.email.trim()) {
+    if (!data.email.trim()) {
       newErrors.email = "יש להזין כתובת אימייל";
-    } else if (!emailRegex.test(formData.email.trim())) {
+    } else if (!emailRegex.test(data.email.trim())) {
       newErrors.email = "יש להזין כתובת אימייל תקינה";
     }
 
-    const amount = Number(formData.amount);
-    if (!formData.amount || !Number.isFinite(amount)) {
+    const amount = Number(data.amount);
+    if (!data.amount || !Number.isFinite(amount)) {
       newErrors.amount = "יש להזין סכום לשובר";
     } else if (amount < MIN_VOUCHER_AMOUNT) {
       newErrors.amount = `הסכום המינימלי לשובר הוא ${MIN_VOUCHER_AMOUNT} ₪`;
@@ -54,6 +54,11 @@ export default function usePurchaseForm() {
       newErrors.amount = `ניתן לבחור סכום בקפיצות של ${VOUCHER_AMOUNT_STEP} ₪`;
     }
 
+    return newErrors;
+  };
+
+  const validate = (): boolean => {
+    const newErrors = getValidationErrors(formData);
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -115,8 +120,10 @@ export default function usePurchaseForm() {
   };
 
   const updateField = (field: keyof FormData, value: string) => {
-    setFormData((previous) => ({ ...previous, [field]: value }));
-    setErrors((previous) => ({ ...previous, [field]: undefined }));
+    const nextFormData = { ...formData, [field]: value };
+    setFormData(nextFormData);
+    const fieldError = getValidationErrors(nextFormData)[field];
+    setErrors((previous) => ({ ...previous, [field]: fieldError }));
   };
 
   return {

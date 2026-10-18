@@ -3,7 +3,6 @@ import {
   MAX_VOUCHER_AMOUNT,
   MIN_VOUCHER_AMOUNT,
   VOUCHER_AMOUNT_STEP,
-  formatCurrency,
 } from "../../utils/voucher";
 
 interface VoucherAmountFieldProps {
@@ -85,9 +84,6 @@ export default function VoucherAmountField({
           −
         </button>
       </div>
-      <p id="amount-help" className="amount-help">
-        הסכום חייב להיות בקפיצות של {formatCurrency(VOUCHER_AMOUNT_STEP)}
-      </p>
       {error && (
         <div id={errorId} className="error-message">
           {error}
