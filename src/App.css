@@ -144,36 +144,44 @@
   color: var(--error);
 }
 
-/* Preset Amount Buttons */
-.preset-amounts {
+.amount-stepper {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
   gap: 8px;
+  align-items: stretch;
   margin-bottom: 12px;
 }
 
-.preset-btn {
-  padding: 10px 8px;
-  background-color: #ffffff;
+.amount-stepper-button {
+  min-height: 48px;
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-main);
-  font-size: 14px;
+  background: #ffffff;
+  color: var(--primary);
+  font: inherit;
+  font-size: 24px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
-.preset-btn:hover {
+.amount-stepper-button:hover:not(:disabled) {
   border-color: var(--primary);
   background-color: var(--primary-light);
-  color: var(--primary);
 }
 
-.preset-btn.active {
-  border-color: var(--primary);
-  background-color: var(--primary);
-  color: #ffffff;
+.amount-stepper-button:disabled {
+  color: var(--text-muted);
+  background: #f1f3ef;
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.amount-help {
+  margin: -4px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .amount-input-wrapper {
@@ -665,10 +673,6 @@
 @media (max-width: 480px) {
   .voucher-card {
     padding: 24px 18px;
-  }
-
-  .preset-amounts {
-    grid-template-columns: repeat(2, 1fr);
   }
 
   .admin-search-form {

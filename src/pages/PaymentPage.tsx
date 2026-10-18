@@ -12,7 +12,10 @@ import type {
 import {
   formatCurrency,
   isRecord,
+  MAX_VOUCHER_AMOUNT,
+  MIN_VOUCHER_AMOUNT,
   PAYMENT_ERROR_MESSAGE,
+  VOUCHER_AMOUNT_STEP,
 } from "../utils/voucher";
 
 export default function PaymentPage() {
@@ -88,8 +91,9 @@ export default function PaymentPage() {
     typeof purchase.phone !== "string" ||
     typeof purchase.email !== "string" ||
     !Number.isFinite(purchase.amount) ||
-    purchase.amount < 10 ||
-    purchase.amount > 10000 ||
+    purchase.amount < MIN_VOUCHER_AMOUNT ||
+    purchase.amount > MAX_VOUCHER_AMOUNT ||
+    purchase.amount % VOUCHER_AMOUNT_STEP !== 0 ||
     !checkout.orderId ||
     !checkout.verificationToken
   ) {

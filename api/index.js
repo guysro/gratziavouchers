@@ -56,7 +56,8 @@ const paypalApiBase =
   paypalEnvironment === "live"
     ? "https://api-m.paypal.com"
     : "https://api-m.sandbox.paypal.com";
-const MIN_AMOUNT_CENTS = 1000;
+const MIN_AMOUNT_CENTS = 10000;
+const AMOUNT_STEP_CENTS = 5000;
 const MAX_AMOUNT_CENTS = 1000000;
 const ORDER_TOKEN_TTL_MS = 30 * 60 * 1000;
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -193,6 +194,7 @@ function getAmountCents(amount) {
   if (
     Math.abs(amount * 100 - cents) > 0.000001 ||
     cents < MIN_AMOUNT_CENTS ||
+    cents % AMOUNT_STEP_CENTS !== 0 ||
     cents > MAX_AMOUNT_CENTS
   ) {
     return null;
@@ -320,6 +322,7 @@ function verifyOrderToken(orderId, token) {
     claims?.orderId !== orderId ||
     !Number.isInteger(claims.amountCents) ||
     claims.amountCents < MIN_AMOUNT_CENTS ||
+    claims.amountCents % AMOUNT_STEP_CENTS !== 0 ||
     claims.amountCents > MAX_AMOUNT_CENTS ||
     typeof claims.purchaseHash !== "string" ||
     !/^[a-f0-9]{64}$/.test(claims.purchaseHash) ||

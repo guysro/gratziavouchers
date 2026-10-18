@@ -1,7 +1,12 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import type { FormData, FormErrors, PurchaseDetails } from "../types/voucher";
-import { isRecord } from "../utils/voucher";
+import {
+  isRecord,
+  MAX_VOUCHER_AMOUNT,
+  MIN_VOUCHER_AMOUNT,
+  VOUCHER_AMOUNT_STEP,
+} from "../utils/voucher";
 
 export default function usePurchaseForm() {
   const navigate = useNavigate();
@@ -41,10 +46,12 @@ export default function usePurchaseForm() {
     const amount = Number(formData.amount);
     if (!formData.amount || !Number.isFinite(amount)) {
       newErrors.amount = "יש להזין סכום לשובר";
-    } else if (amount < 10) {
-      newErrors.amount = "הסכום המינימלי לשובר הוא 10 ₪";
-    } else if (amount > 10000) {
+    } else if (amount < MIN_VOUCHER_AMOUNT) {
+      newErrors.amount = `הסכום המינימלי לשובר הוא ${MIN_VOUCHER_AMOUNT} ₪`;
+    } else if (amount > MAX_VOUCHER_AMOUNT) {
       newErrors.amount = "הסכום המרבי לשובר הוא 10,000 ₪";
+    } else if (amount % VOUCHER_AMOUNT_STEP !== 0) {
+      newErrors.amount = `ניתן לבחור סכום בקפיצות של ${VOUCHER_AMOUNT_STEP} ₪`;
     }
 
     setErrors(newErrors);
@@ -112,10 +119,6 @@ export default function usePurchaseForm() {
     setErrors((previous) => ({ ...previous, [field]: undefined }));
   };
 
-  const handlePresetClick = (amount: number) => {
-    updateField("amount", amount.toString());
-  };
-
   return {
     formData,
     errors,
@@ -123,6 +126,5 @@ export default function usePurchaseForm() {
     submitError,
     handleSubmit,
     updateField,
-    handlePresetClick,
   };
 }
