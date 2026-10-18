@@ -14,8 +14,10 @@ export default function BrandHeader({
         src="/logo.jpg"
         alt="גרציא מתנות ואירועים"
       />
-      <h1>{title}</h1>
-      <p>{description}</p>
+      <div className="voucher-header-copy">
+        <h1>{title}</h1>
+        <p>{description}</p>
+      </div>
     </header>
   );
 }
