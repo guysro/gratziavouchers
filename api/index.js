@@ -336,9 +336,11 @@ function verifyOrderToken(orderId, token) {
 
 function generateVoucherCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const part = () =>
-    Array.from({ length: 4 }, () => chars[randomInt(chars.length)]).join("");
-  return `GRZ-${part()}-${part()}`;
+  const suffix = Array.from(
+    { length: 6 },
+    () => chars[randomInt(chars.length)],
+  ).join("");
+  return `GRZ-${suffix}`;
 }
 
 function serializeVoucher(voucher) {
@@ -348,11 +350,7 @@ function serializeVoucher(voucher) {
     phone: voucher.phone,
     email: voucher.email,
     amount: voucher.amount,
-    date: new Date(voucher.createdAt).toLocaleDateString("he-IL", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    }),
+    date: new Date(voucher.createdAt).toISOString(),
   };
 }
 
@@ -360,27 +358,31 @@ async function saveVoucher({ orderId, purchase, amountCents }) {
   const existing = await vouchersCollection.findOne({ paypalOrderId: orderId });
   if (existing) return serializeVoucher(existing);
 
-  const voucher = {
-    paypalOrderId: orderId,
-    voucherCode: generateVoucherCode(),
-    ...purchase,
-    amount: amountCents / 100,
-    currency: "ILS",
-    status: "paid",
-    createdAt: new Date(),
-  };
-
-  try {
-    await vouchersCollection.insertOne(voucher);
-    return serializeVoucher(voucher);
-  } catch (error) {
-    if (error?.code !== 11000) throw error;
-    const existingVoucher = await vouchersCollection.findOne({
+  let duplicateError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const voucher = {
       paypalOrderId: orderId,
-    });
-    if (existingVoucher) return serializeVoucher(existingVoucher);
-    throw error;
+      voucherCode: generateVoucherCode(),
+      ...purchase,
+      amount: amountCents / 100,
+      currency: "ILS",
+      status: "paid",
+      createdAt: new Date(),
+    };
+
+    try {
+      await vouchersCollection.insertOne(voucher);
+      return serializeVoucher(voucher);
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      const existingVoucher = await vouchersCollection.findOne({
+        paypalOrderId: orderId,
+      });
+      if (existingVoucher) return serializeVoucher(existingVoucher);
+      duplicateError = error;
+    }
   }
+  throw duplicateError;
 }
 
 async function paypalRequest(
@@ -615,6 +617,7 @@ app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
                 { name: { $regex: safeSearch, $options: "i" } },
                 { phone: { $regex: safeSearch, $options: "i" } },
                 { email: { $regex: safeSearch, $options: "i" } },
+                { voucherCode: { $regex: safeSearch, $options: "i" } },
               ],
             }
           : {},
@@ -647,7 +650,7 @@ app.patch(
   requireAdmin,
   async (request, response) => {
     const { voucherCode } = request.params;
-    if (!/^GRZ-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(voucherCode)) {
+    if (!/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(voucherCode)) {
       return response.status(400).json({ error: "קוד השובר אינו תקין." });
     }
 
@@ -800,7 +803,7 @@ app.patch(
   requireAdmin,
   async (request, response) => {
     const { voucherCode } = request.params;
-    if (!/^GRZ-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(voucherCode)) {
+    if (!/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(voucherCode)) {
       return response.status(400).json({ error: "קוד השובר אינו תקין." });
     }
 

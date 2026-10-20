@@ -218,7 +218,7 @@ export default function AdminPage() {
               <div className="admin-search-form">
                 <FormField
                   id="voucher-search"
-                  label="חיפוש לפי שם, טלפון או אימייל"
+                  label="חיפוש לפי שם, טלפון, אימייל או מזהה שובר"
                   type="search"
                   placeholder="חיפוש..."
                   value={search}

@@ -33,6 +33,11 @@ export default function PaymentPage() {
   const [paypalConfigLoading, setPaypalConfigLoading] = useState(true);
   const [completedVoucher, setCompletedVoucher] =
     useState<CompletedVoucher | null>(null);
+  const [voucherPdfUrl, setVoucherPdfUrl] = useState<string | null>(null);
+  const [voucherPdfError, setVoucherPdfError] = useState(false);
+  const [voucherPdfAttempt, setVoucherPdfAttempt] = useState(0);
+  const voucherPdfLoading =
+    completedVoucher !== null && !voucherPdfUrl && !voucherPdfError;
 
   const clearPaymentStageTimeout = () => {
     if (paymentStageTimeoutRef.current !== null) {
@@ -84,6 +89,39 @@ export default function PaymentPage() {
     [],
   );
 
+  useEffect(() => {
+    if (!completedVoucher) return;
+
+    let cancelled = false;
+    let objectUrl: string | null = null;
+
+    const generatePdf = async () => {
+      try {
+        const { createVoucherPdf } = await import("../utils/voucherPdf");
+        const pdf = await createVoucherPdf(completedVoucher);
+        objectUrl = URL.createObjectURL(
+          new Blob([Uint8Array.from(pdf).buffer], {
+            type: "application/pdf",
+          }),
+        );
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+        } else {
+          setVoucherPdfUrl(objectUrl);
+        }
+      } catch (error) {
+        console.error("Voucher PDF generation failed.", error);
+        if (!cancelled) setVoucherPdfError(true);
+      }
+    };
+
+    void generatePdf();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [completedVoucher, voucherPdfAttempt]);
+
   if (
     !checkout ||
     !purchase ||
@@ -133,6 +171,33 @@ export default function PaymentPage() {
                   },
                 ]}
               />
+              {voucherPdfUrl ? (
+                <a
+                  className="reset-btn voucher-download-link"
+                  href={voucherPdfUrl}
+                  download={`voucher-${completedVoucher.voucherCode}.pdf`}
+                >
+                  הורדת השובר כקובץ PDF
+                </a>
+              ) : voucherPdfError ? (
+                <>
+                  <div className="payment-error" role="alert">
+                    לא ניתן להכין את קובץ השובר. אפשר לנסות שוב.
+                  </div>
+                  <button
+                    type="button"
+                    className="reset-btn"
+                    onClick={() => {
+                      setVoucherPdfError(false);
+                      setVoucherPdfAttempt((attempt) => attempt + 1);
+                    }}
+                  >
+                    ניסיון נוסף להורדת השובר
+                  </button>
+                </>
+              ) : voucherPdfLoading ? (
+                <PaymentStatus message="מכינים את קובץ השובר להורדה..." />
+              ) : null}
               <button
                 type="button"
                 className="reset-btn"

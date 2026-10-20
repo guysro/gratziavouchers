@@ -354,6 +354,13 @@
   background-color: var(--primary-light);
 }
 
+.voucher-download-link {
+  display: block;
+  margin-bottom: 12px;
+  text-align: center;
+  text-decoration: none;
+}
+
 .payment-card {
   text-align: right;
 }
