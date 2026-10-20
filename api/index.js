@@ -638,7 +638,15 @@ app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
       )
       .sort({ createdAt: -1 })
       .toArray();
-    return response.json({ vouchers });
+
+    const nonExpiredVouchers = vouchers.filter((voucher) => {
+      const createdAt = new Date(voucher.createdAt);
+      const expirationDate = new Date(createdAt);
+      expirationDate.setFullYear(expirationDate.getFullYear() + 1);
+      return new Date() < expirationDate;
+    });
+
+    return response.json({ vouchers: nonExpiredVouchers });
   } catch (error) {
     console.error("Admin voucher search failed.", error?.name ?? "Error");
     return response.status(500).json({ error: "החיפוש נכשל. נסו שוב." });
@@ -650,7 +658,11 @@ app.patch(
   requireAdmin,
   async (request, response) => {
     const { voucherCode } = request.params;
-    if (!/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(voucherCode)) {
+    if (
+      !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
+        voucherCode,
+      )
+    ) {
       return response.status(400).json({ error: "קוד השובר אינו תקין." });
     }
 
@@ -803,7 +815,11 @@ app.patch(
   requireAdmin,
   async (request, response) => {
     const { voucherCode } = request.params;
-    if (!/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(voucherCode)) {
+    if (
+      !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
+        voucherCode,
+      )
+    ) {
       return response.status(400).json({ error: "קוד השובר אינו תקין." });
     }
 

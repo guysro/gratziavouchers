@@ -183,7 +183,7 @@ export default function PaymentPage() {
                 <>
                   <div className="payment-error" role="alert">
                     לא ניתן להכין את קובץ השובר. אפשר לנסות שוב.
-                  </div>
+                  </div>  
                   <button
                     type="button"
                     className="reset-btn"
