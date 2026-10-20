@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { MongoClient } from "mongodb";
+import { createVoucherPdf } from "./voucherPdf.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -102,6 +103,15 @@ app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+  }),
+);
+app.use(
+  "/api/vouchers",
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 20,
     standardHeaders: "draft-8",
     legacyHeaders: false,
   }),
@@ -598,6 +608,47 @@ app.get("/api/admin/session", (request, response) => {
   return response.json({
     authenticated: isValidAdminSession(getCookie(request, "gratzia_admin")),
   });
+});
+
+app.get("/api/vouchers/:voucherCode/pdf", async (request, response) => {
+  const { voucherCode } = request.params;
+  if (
+    !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
+      voucherCode,
+    )
+  ) {
+    return response.status(400).json({ error: "קוד השובר אינו תקין." });
+  }
+
+  try {
+    const voucher = await vouchersCollection.findOne({
+      voucherCode,
+      status: "paid",
+    });
+    if (!voucher) {
+      return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
+    }
+
+    const expiry = new Date(voucher.createdAt);
+    if (Number.isNaN(expiry.getTime())) {
+      throw new Error("Invalid voucher creation date.");
+    }
+    expiry.setUTCFullYear(expiry.getUTCFullYear() + 1);
+    if (Date.now() >= expiry.getTime()) {
+      return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
+    }
+
+    const pdf = await createVoucherPdf(voucher);
+    response.set({
+      "Cache-Control": "private, no-store",
+      "Content-Disposition": `attachment; filename="voucher-${voucherCode}.pdf"`,
+      "Content-Type": "application/pdf",
+    });
+    return response.send(Buffer.from(pdf));
+  } catch (error) {
+    console.error("Voucher PDF generation failed.", error?.name ?? "Error");
+    return response.status(500).json({ error: "לא ניתן להכין את השובר כרגע." });
+  }
 });
 
 app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {

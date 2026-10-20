@@ -97,12 +97,13 @@ export default function PaymentPage() {
 
     const generatePdf = async () => {
       try {
-        const { createVoucherPdf } = await import("../utils/voucherPdf");
-        const pdf = await createVoucherPdf(completedVoucher);
+        const response = await fetch(
+          `/api/vouchers/${encodeURIComponent(completedVoucher.voucherCode)}/pdf`,
+        );
+        if (!response.ok) throw new Error("Voucher PDF download failed");
+        const pdf = await response.blob();
         objectUrl = URL.createObjectURL(
-          new Blob([Uint8Array.from(pdf).buffer], {
-            type: "application/pdf",
-          }),
+          new Blob([pdf], { type: "application/pdf" }),
         );
         if (cancelled) {
           URL.revokeObjectURL(objectUrl);
@@ -110,8 +111,10 @@ export default function PaymentPage() {
           setVoucherPdfUrl(objectUrl);
         }
       } catch (error) {
-        console.error("Voucher PDF generation failed.", error);
-        if (!cancelled) setVoucherPdfError(true);
+        if (!cancelled) {
+          console.error("Voucher PDF generation failed.", error);
+          setVoucherPdfError(true);
+        }
       }
     };
 

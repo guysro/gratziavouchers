@@ -1,5 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/[...path].js": {
+      "includeFiles": "private/**/*"
+    }
+  },
   "rewrites": [
     {
       "source": "/api/:path*",
