@@ -99,6 +99,11 @@ export default function PaymentPage() {
       try {
         const response = await fetch(
           `/api/vouchers/${encodeURIComponent(completedVoucher.voucherCode)}/pdf`,
+          {
+            headers: {
+              Authorization: `Bearer ${completedVoucher.downloadToken}`,
+            },
+          },
         );
         if (!response.ok) throw new Error("Voucher PDF download failed");
         const pdf = await response.blob();
@@ -321,6 +326,7 @@ export default function PaymentPage() {
                             typeof voucher.email !== "string" ||
                             typeof voucher.amount !== "number" ||
                             typeof voucher.date !== "string" ||
+                            typeof voucher.downloadToken !== "string" ||
                             Math.round(voucher.amount * 100) !==
                               Math.round(purchase.amount * 100)
                           ) {
@@ -336,6 +342,7 @@ export default function PaymentPage() {
                             email: voucher.email,
                             amount: voucher.amount,
                             date: voucher.date,
+                            downloadToken: voucher.downloadToken,
                           });
                         } catch {
                           console.error("Payment confirmation request failed.");

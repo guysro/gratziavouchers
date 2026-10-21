@@ -2,7 +2,10 @@ import type { CompletedVoucher } from "../../types/voucher";
 import { formatCurrency } from "../../utils/voucher";
 
 interface VoucherTicketProps {
-  voucher: CompletedVoucher;
+  voucher: Pick<
+    CompletedVoucher,
+    "voucherCode" | "name" | "phone" | "email" | "amount" | "date"
+  >;
 }
 
 export default function VoucherTicket({ voucher }: VoucherTicketProps) {

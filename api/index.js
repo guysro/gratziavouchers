@@ -353,6 +353,21 @@ function generateVoucherCode() {
   return `GRZ-${suffix}`;
 }
 
+function createVoucherDownloadToken(voucher) {
+  return createHmac("sha256", adminSessionSecret)
+    .update(`voucher-pdf:${voucher.paypalOrderId}:${voucher.voucherCode}`)
+    .digest("base64url");
+}
+
+function isValidVoucherDownloadToken(voucher, token) {
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    return false;
+  }
+  const supplied = Buffer.from(token);
+  const expected = Buffer.from(createVoucherDownloadToken(voucher));
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
 function serializeVoucher(voucher) {
   return {
     voucherCode: voucher.voucherCode,
@@ -361,6 +376,7 @@ function serializeVoucher(voucher) {
     email: voucher.email,
     amount: voucher.amount,
     date: new Date(voucher.createdAt).toISOString(),
+    downloadToken: createVoucherDownloadToken(voucher),
   };
 }
 
@@ -659,7 +675,7 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
   }
 });
 
-app.get("/api/vouchers/:voucherCode/pdf", async (request, response) => {
+async function sendVoucherPdf(request, response, requireDownloadToken) {
   const { voucherCode } = request.params;
   if (
     !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
@@ -675,6 +691,15 @@ app.get("/api/vouchers/:voucherCode/pdf", async (request, response) => {
       status: "paid",
     });
     if (!voucher) {
+      return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
+    }
+    if (
+      requireDownloadToken &&
+      !isValidVoucherDownloadToken(
+        voucher,
+        request.get("authorization")?.match(/^Bearer ([A-Za-z0-9_-]+)$/i)?.[1],
+      )
+    ) {
       return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
     }
 
@@ -698,7 +723,17 @@ app.get("/api/vouchers/:voucherCode/pdf", async (request, response) => {
     console.error("Voucher PDF generation failed.", error?.name ?? "Error");
     return response.status(500).json({ error: "לא ניתן להכין את השובר כרגע." });
   }
-});
+}
+
+app.get("/api/vouchers/:voucherCode/pdf", (request, response) =>
+  sendVoucherPdf(request, response, true),
+);
+
+app.get(
+  "/api/admin/vouchers/:voucherCode/pdf",
+  requireAdmin,
+  (request, response) => sendVoucherPdf(request, response, false),
+);
 
 app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
   const search =

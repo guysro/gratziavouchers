@@ -28,6 +28,7 @@ export interface PaymentNavigationState {
 export interface CompletedVoucher extends PurchaseDetails {
   voucherCode: string;
   date: string;
+  downloadToken: string;
 }
 
 export interface AdminVoucher {

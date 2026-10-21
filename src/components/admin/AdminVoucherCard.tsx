@@ -42,7 +42,7 @@ export default function AdminVoucherCard({
       {voucher.source === "admin" && voucher.status === "paid" && (
         <a
           className="admin-voucher-download"
-          href={`/api/vouchers/${encodeURIComponent(voucher.voucherCode)}/pdf`}
+          href={`/api/admin/vouchers/${encodeURIComponent(voucher.voucherCode)}/pdf`}
         >
           הורדת השובר
         </a>

@@ -437,7 +437,7 @@ export default function AdminPage() {
                       />
                       <a
                         className="admin-created-voucher-download"
-                        href={`/api/vouchers/${encodeURIComponent(createdVoucher.voucherCode)}/pdf`}
+                        href={`/api/admin/vouchers/${encodeURIComponent(createdVoucher.voucherCode)}/pdf`}
                       >
                         <span aria-hidden="true">↓</span>
                         הורדת השובר כקובץ PDF
