@@ -27,8 +27,9 @@ export default function AdminVoucherCard({
         <span dir="ltr">{voucher.phone}</span>
         <span dir="ltr">{voucher.email}</span>
         <strong>{formatCurrency(voucher.amount)}</strong>
+        {voucher.source === "admin" && <span>הונפק ללא תשלום</span>}
         <span>
-          נרכש:{" "}
+          {voucher.source === "admin" ? "נוצר: " : "נרכש: "}
           {new Date(voucher.createdAt).toLocaleDateString("he-IL")}
         </span>
         {voucher.redeemedAt && (
@@ -38,6 +39,14 @@ export default function AdminVoucherCard({
           </span>
         )}
       </div>
+      {voucher.source === "admin" && voucher.status === "paid" && (
+        <a
+          className="admin-voucher-download"
+          href={`/api/vouchers/${encodeURIComponent(voucher.voucherCode)}/pdf`}
+        >
+          הורדת השובר
+        </a>
+      )}
       {voucher.status === "paid" && (
         <button
           type="button"

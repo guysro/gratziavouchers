@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { MongoClient } from "mongodb";
-import { createVoucherPdf } from "./voucherPdf.js";
+import { createVoucherPdf } from "../server/voucherPdf.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -610,6 +610,55 @@ app.get("/api/admin/session", (request, response) => {
   });
 });
 
+app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
+  const purchase = normalizePurchase(request.body);
+  const amountCents = getAmountCents(request.body?.amount);
+  if (!purchase || amountCents === null) {
+    return response.status(400).json({ error: "פרטי השובר אינם תקינים." });
+  }
+
+  try {
+    let voucher;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      voucher = {
+        paypalOrderId: `admin-${randomUUID()}`,
+        voucherCode: generateVoucherCode(),
+        ...purchase,
+        amount: amountCents / 100,
+        currency: "ILS",
+        status: "paid",
+        source: "admin",
+        createdAt: new Date(),
+      };
+
+      try {
+        await vouchersCollection.insertOne(voucher);
+        break;
+      } catch (error) {
+        if (error?.code !== 11000) throw error;
+        if (attempt === 4) throw error;
+      }
+    }
+
+    return response.status(201).json({
+      voucher: {
+        voucherCode: voucher.voucherCode,
+        name: voucher.name,
+        phone: voucher.phone,
+        email: voucher.email,
+        amount: voucher.amount,
+        currency: voucher.currency,
+        status: voucher.status,
+        source: voucher.source,
+        createdAt: voucher.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error("Admin voucher creation failed.", error?.name ?? "Error");
+    return response.status(500).json({ error: "לא ניתן ליצור את השובר כרגע." });
+  }
+});
+
 app.get("/api/vouchers/:voucherCode/pdf", async (request, response) => {
   const { voucherCode } = request.params;
   if (
@@ -682,6 +731,7 @@ app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
             amount: 1,
             currency: 1,
             status: 1,
+            source: 1,
             createdAt: 1,
             redeemedAt: 1,
           },
@@ -745,6 +795,7 @@ app.patch(
             amount: 1,
             currency: 1,
             status: 1,
+            source: 1,
             createdAt: 1,
             redeemedAt: 1,
           },

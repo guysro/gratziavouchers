@@ -38,6 +38,7 @@ export interface AdminVoucher {
   amount: number;
   currency: string;
   status: "paid" | "redeemed";
+  source?: "admin";
   createdAt: string;
   redeemedAt?: string;
 }
