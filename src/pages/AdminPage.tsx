@@ -539,6 +539,18 @@ export default function AdminPage() {
                   }}
                   maxLength={100}
                 />
+                <button
+                  type="button"
+                  className="submit-btn"
+                  onClick={() => {
+                    setSearching(true);
+                    setMessage("");
+                    setSearchRefresh((refresh) => refresh + 1);
+                  }}
+                  disabled={searching}
+                >
+                  {searching ? "מרעננים..." : "רענון שוברים"}
+                </button>
               </div>
 
               {message && (

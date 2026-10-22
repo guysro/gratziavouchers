@@ -39,7 +39,7 @@ export default function AdminVoucherCard({
           </span>
         )}
       </div>
-      {voucher.source === "admin" && voucher.status === "paid" && (
+      {voucher.status === "paid" && (
         <a
           className="admin-voucher-download"
           href={`/api/admin/vouchers/${encodeURIComponent(voucher.voucherCode)}/pdf`}
