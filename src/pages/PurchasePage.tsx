@@ -13,7 +13,6 @@ export default function PurchasePage() {
     submitError,
     handleSubmit,
     updateField,
-    handlePresetClick,
   } = usePurchaseForm();
 
   return (
@@ -64,7 +63,7 @@ export default function PurchasePage() {
               value={formData.amount}
               error={errors.amount}
               onChange={(event) => updateField("amount", event.target.value)}
-              onPresetSelect={handlePresetClick}
+              onAmountChange={(amount) => updateField("amount", amount)}
             />
 
             {submitting && (

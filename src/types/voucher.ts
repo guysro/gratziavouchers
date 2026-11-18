@@ -28,6 +28,7 @@ export interface PaymentNavigationState {
 export interface CompletedVoucher extends PurchaseDetails {
   voucherCode: string;
   date: string;
+  downloadToken: string;
 }
 
 export interface AdminVoucher {
@@ -38,6 +39,10 @@ export interface AdminVoucher {
   amount: number;
   currency: string;
   status: "paid" | "redeemed";
+  source?: "admin";
   createdAt: string;
   redeemedAt?: string;
+  whatsapp?: { status: WhatsAppStatus };
 }
+
+export type WhatsAppStatus = "sending" | "sent" | "failed" | "retry";

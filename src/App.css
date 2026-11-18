@@ -37,23 +37,32 @@
 }
 
 .voucher-header {
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
   margin-bottom: 28px;
+  text-align: right;
 }
 
 .brand-logo {
   display: block;
-  width: 92px;
-  height: 92px;
-  margin: 0 auto 18px;
-  border-radius: 20px;
+  flex: 0 0 auto;
+  width: 76px;
+  height: 76px;
+  margin: 0;
+  border-radius: 16px;
   box-shadow: 0 8px 22px rgba(35, 58, 39, 0.16);
   object-fit: cover;
 }
 
+.voucher-header-copy {
+  min-width: 0;
+}
+
 .voucher-header h1 {
-  margin: 0 0 8px;
-  font-size: 30px;
+  margin: 0 0 5px;
+  font-size: 26px;
   font-weight: 700;
   color: var(--text-main);
   letter-spacing: -0.5px;
@@ -61,8 +70,28 @@
 
 .voucher-header p {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   color: var(--text-muted);
+}
+
+@media (max-width: 380px) {
+  .voucher-header {
+    gap: 12px;
+  }
+
+  .brand-logo {
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+  }
+
+  .voucher-header h1 {
+    font-size: 22px;
+  }
+
+  .voucher-header p {
+    font-size: 13px;
+  }
 }
 
 .voucher-card {
@@ -115,36 +144,44 @@
   color: var(--error);
 }
 
-/* Preset Amount Buttons */
-.preset-amounts {
+.amount-stepper {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
   gap: 8px;
+  align-items: stretch;
   margin-bottom: 12px;
 }
 
-.preset-btn {
-  padding: 10px 8px;
-  background-color: #ffffff;
+.amount-stepper-button {
+  min-height: 48px;
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-main);
-  font-size: 14px;
+  background: #ffffff;
+  color: var(--primary);
+  font: inherit;
+  font-size: 24px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
-.preset-btn:hover {
+.amount-stepper-button:hover:not(:disabled) {
   border-color: var(--primary);
   background-color: var(--primary-light);
-  color: var(--primary);
 }
 
-.preset-btn.active {
-  border-color: var(--primary);
-  background-color: var(--primary);
-  color: #ffffff;
+.amount-stepper-button:disabled {
+  color: var(--text-muted);
+  background: #f1f3ef;
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.amount-help {
+  margin: -4px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .amount-input-wrapper {
@@ -317,6 +354,14 @@
   background-color: var(--primary-light);
 }
 
+.voucher-download-link {
+  display: block;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+  text-align: center;
+  text-decoration: none;
+}
+
 .payment-card {
   text-align: right;
 }
@@ -408,6 +453,27 @@
   font-size: 14px;
 }
 
+.admin-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.admin-create-trigger {
+  padding: 9px 14px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-create-trigger:hover {
+  background: var(--primary-hover);
+}
+
 .admin-logout {
   border: 0;
   background: transparent;
@@ -415,6 +481,124 @@
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+}
+
+.admin-create-dialog {
+  width: min(100% - 32px, 560px);
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 20px;
+  color: var(--text-main);
+  background: var(--bg-card);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.25);
+  direction: rtl;
+}
+
+.admin-create-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(3px);
+}
+
+.admin-create-form {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+  padding: 52px 28px 28px;
+}
+
+.admin-create-close {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: #f1f5f9;
+  color: #334155;
+  font: inherit;
+  font-size: 23px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.admin-create-close:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.admin-create-close:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.admin-create-form h2 {
+  grid-column: 1 / -1;
+  margin: 0 0 16px;
+  font-size: 17px;
+}
+
+.admin-create-form .submit-btn,
+.admin-create-form .admin-message,
+.admin-created-voucher-download {
+  grid-column: 1 / -1;
+}
+
+.admin-create-form .admin-create-success {
+  grid-column: 1 / -1;
+}
+
+.admin-created-voucher-download {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 52px;
+  margin-top: 8px;
+  padding: 14px 20px;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  transition: background-color 0.15s ease, transform 0.05s ease;
+}
+
+.admin-created-voucher-download:hover {
+  background: var(--primary-hover);
+}
+
+.admin-created-voucher-download:active {
+  transform: scale(0.99);
+}
+
+.admin-created-voucher-download span {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.admin-create-form .submit-btn {
+  margin-top: 8px;
+}
+
+.admin-create-actions .submit-btn {
+  box-sizing: border-box;
+  min-height: 52px;
+  grid-column: 1 / -1;
+  margin: 8px 0 0;
+}
+
+.admin-create-actions {
+  grid-column: 1 / -1;
 }
 
 .admin-search-form {
@@ -499,6 +683,33 @@
   font-size: 14px;
   overflow-wrap: anywhere;
   text-align: right;
+}
+
+.admin-voucher-download {
+  display: inline-block;
+  margin-top: 16px;
+  color: var(--primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.admin-voucher-whatsapp {
+  margin-top: 16px;
+  margin-inline-start: 16px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.admin-voucher-whatsapp:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .redeem-btn {
@@ -638,8 +849,14 @@
     padding: 24px 18px;
   }
 
-  .preset-amounts {
-    grid-template-columns: repeat(2, 1fr);
+  .admin-toolbar {
+    align-items: flex-start;
+  }
+
+  .admin-toolbar-actions {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
   }
 
   .admin-search-form {
@@ -661,5 +878,10 @@
 
   .redeem-dialog-actions {
     grid-template-columns: 1fr;
+  }
+
+  .admin-create-form {
+    grid-template-columns: 1fr;
+    padding: 52px 20px 24px;
   }
 }

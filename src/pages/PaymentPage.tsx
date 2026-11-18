@@ -12,7 +12,10 @@ import type {
 import {
   formatCurrency,
   isRecord,
+  MAX_VOUCHER_AMOUNT,
+  MIN_VOUCHER_AMOUNT,
   PAYMENT_ERROR_MESSAGE,
+  VOUCHER_AMOUNT_STEP,
 } from "../utils/voucher";
 
 export default function PaymentPage() {
@@ -30,6 +33,11 @@ export default function PaymentPage() {
   const [paypalConfigLoading, setPaypalConfigLoading] = useState(true);
   const [completedVoucher, setCompletedVoucher] =
     useState<CompletedVoucher | null>(null);
+  const [voucherPdfUrl, setVoucherPdfUrl] = useState<string | null>(null);
+  const [voucherPdfError, setVoucherPdfError] = useState(false);
+  const [voucherPdfAttempt, setVoucherPdfAttempt] = useState(0);
+  const voucherPdfLoading =
+    completedVoucher !== null && !voucherPdfUrl && !voucherPdfError;
 
   const clearPaymentStageTimeout = () => {
     if (paymentStageTimeoutRef.current !== null) {
@@ -81,6 +89,47 @@ export default function PaymentPage() {
     [],
   );
 
+  useEffect(() => {
+    if (!completedVoucher) return;
+
+    let cancelled = false;
+    let objectUrl: string | null = null;
+
+    const generatePdf = async () => {
+      try {
+        const response = await fetch(
+          `/api/vouchers/${encodeURIComponent(completedVoucher.voucherCode)}/pdf`,
+          {
+            headers: {
+              Authorization: `Bearer ${completedVoucher.downloadToken}`,
+            },
+          },
+        );
+        if (!response.ok) throw new Error("Voucher PDF download failed");
+        const pdf = await response.blob();
+        objectUrl = URL.createObjectURL(
+          new Blob([pdf], { type: "application/pdf" }),
+        );
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+        } else {
+          setVoucherPdfUrl(objectUrl);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Voucher PDF generation failed.", error);
+          setVoucherPdfError(true);
+        }
+      }
+    };
+
+    void generatePdf();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [completedVoucher, voucherPdfAttempt]);
+
   if (
     !checkout ||
     !purchase ||
@@ -88,8 +137,9 @@ export default function PaymentPage() {
     typeof purchase.phone !== "string" ||
     typeof purchase.email !== "string" ||
     !Number.isFinite(purchase.amount) ||
-    purchase.amount < 10 ||
-    purchase.amount > 10000 ||
+    purchase.amount < MIN_VOUCHER_AMOUNT ||
+    purchase.amount > MAX_VOUCHER_AMOUNT ||
+    purchase.amount % VOUCHER_AMOUNT_STEP !== 0 ||
     !checkout.orderId ||
     !checkout.verificationToken
   ) {
@@ -129,6 +179,33 @@ export default function PaymentPage() {
                   },
                 ]}
               />
+              {voucherPdfUrl ? (
+                <a
+                  className="reset-btn voucher-download-link"
+                  href={voucherPdfUrl}
+                  download={`voucher-${completedVoucher.voucherCode}.pdf`}
+                >
+                  הורדת השובר כקובץ PDF
+                </a>
+              ) : voucherPdfError ? (
+                <>
+                  <div className="payment-error" role="alert">
+                    לא ניתן להכין את קובץ השובר. אפשר לנסות שוב.
+                  </div>  
+                  <button
+                    type="button"
+                    className="reset-btn"
+                    onClick={() => {
+                      setVoucherPdfError(false);
+                      setVoucherPdfAttempt((attempt) => attempt + 1);
+                    }}
+                  >
+                    ניסיון נוסף להורדת השובר
+                  </button>
+                </>
+              ) : voucherPdfLoading ? (
+                <PaymentStatus message="מכינים את קובץ השובר להורדה..." />
+              ) : null}
               <button
                 type="button"
                 className="reset-btn"
@@ -249,6 +326,7 @@ export default function PaymentPage() {
                             typeof voucher.email !== "string" ||
                             typeof voucher.amount !== "number" ||
                             typeof voucher.date !== "string" ||
+                            typeof voucher.downloadToken !== "string" ||
                             Math.round(voucher.amount * 100) !==
                               Math.round(purchase.amount * 100)
                           ) {
@@ -264,6 +342,7 @@ export default function PaymentPage() {
                             email: voucher.email,
                             amount: voucher.amount,
                             date: voucher.date,
+                            downloadToken: voucher.downloadToken,
                           });
                         } catch {
                           console.error("Payment confirmation request failed.");

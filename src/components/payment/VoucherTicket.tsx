@@ -2,7 +2,10 @@ import type { CompletedVoucher } from "../../types/voucher";
 import { formatCurrency } from "../../utils/voucher";
 
 interface VoucherTicketProps {
-  voucher: CompletedVoucher;
+  voucher: Pick<
+    CompletedVoucher,
+    "voucherCode" | "name" | "phone" | "email" | "amount" | "date"
+  >;
 }
 
 export default function VoucherTicket({ voucher }: VoucherTicketProps) {
@@ -19,7 +22,13 @@ export default function VoucherTicket({ voucher }: VoucherTicketProps) {
       </div>
       <div className="voucher-ticket-recipient">
         <span>הונפק עבור: {voucher.name}</span>
-        <span>{voucher.date}</span>
+        <span>
+          {new Date(voucher.date).toLocaleDateString("he-IL", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          })}
+        </span>
       </div>
     </div>
   );
