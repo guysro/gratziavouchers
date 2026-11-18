@@ -14,6 +14,13 @@ If Node.js reports `querySrv ECONNREFUSED` for the MongoDB Atlas hostname while 
 
 Local development uses the `vouchers_dev` collection by default. Production uses the existing `vouchers` collection, preserving current production data. Override the names independently with `MONGODB_COLLECTION_DEVELOPMENT` and `MONGODB_COLLECTION_PRODUCTION`. On Vercel, only the Production environment uses the production collection; Preview and Development use the development collection.
 
+## Tests
+
+Run `npm test`. The server tests in `tests/` use an in-memory MongoDB and fake PayPal and Meta APIs, so they never touch real data or send real payments or messages, and they do not read `.env`. The first run downloads a MongoDB binary (about 100 MB), which takes a minute.
+
+- `tests/payments.test.js`: checkout, amount and token tampering, pending captures, the PayPal webhook, and browser/webhook races.
+- `tests/access.test.js`: customer PDF download authorization, admin authentication and login rate limiting, and voucher redemption.
+
 ## Admin voucher management
 
 Open `/admin` to sign in with `ADMIN_PASSWORD`. Search by customer name, phone, email, or voucher code. Search results are limited to the 50 newest non-expired vouchers. Vouchers expire one year after creation (computed in UTC by `server/voucherExpiry.js`); expired vouchers cannot be redeemed or downloaded. Paid vouchers can be redeemed once; redemption atomically changes their status to `redeemed` and records the time in MongoDB. The admin session uses an HttpOnly, SameSite cookie and expires after eight hours.
