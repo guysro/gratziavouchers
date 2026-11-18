@@ -40,6 +40,28 @@ Phone numbers starting with `0` get `WHATSAPP_DEFAULT_COUNTRY_CODE` (default `97
 
 The send status is stored on the voucher (`whatsapp.status`: `sent`, `failed`, or `retry`) and shown on the admin page, where a voucher can be sent or resent manually. Sends are deduplicated, so a browser capture and a webhook running at the same time send only one message. If a send fails transiently (network, rate limit, Meta outage), the PayPal webhook responds with an error so PayPal redelivers the event later and the send is retried. Permanent failures (invalid number, template mismatch) are not retried automatically; use the admin page after fixing the cause. `sent` means Meta accepted the message, not that it was delivered.
 
+## Event log
+
+Payments, vouchers, WhatsApp sends and admin actions are logged as structured events, both successes and failures. Each event is printed as a JSON line to the console (Vercel → project → **Logs**) and stored in MongoDB in `<collection>_logs`, where it is deleted automatically after `LOG_RETENTION_DAYS` (default 180).
+
+Each entry has `at`, `event`, `outcome` (`success` / `failure`) and, depending on the event, `orderId`, `voucherCode`, `amount`, `source`/`trigger`, `reason`, `error` and `ip` (the client IP, for security review). Customer names, phone numbers and emails are never logged.
+
+| Event | Logged when |
+|---|---|
+| `paypal.order.create` | A checkout order is created or rejected |
+| `paypal.capture` | A payment is captured (`source`: `browser` or `webhook`) or fails, e.g. `captureStatus: "PENDING"` |
+| `paypal.webhook` | A PayPal webhook is received, fulfilled, ignored or rejected |
+| `voucher.issue` | A paid voucher is created (once per order) |
+| `voucher.pdf.download` | A customer downloads a voucher PDF |
+| `whatsapp.send` | A WhatsApp send succeeds or fails (`trigger` shows what started it) |
+| `admin.login` / `admin.logout` | Admin sign-in (including wrong passwords) and sign-out |
+| `admin.unauthorized` | An admin endpoint is called without a valid session |
+| `admin.voucher.create` / `admin.voucher.redeem` / `admin.voucher.pdf.download` / `admin.whatsapp.resend` | Admin actions on vouchers |
+| `admin.voucher.search` | Failed searches only; successful searches run on every keystroke and are not logged |
+| `server.error` | Any unhandled server error |
+
+To find everything that happened to an order, filter the collection by `orderId` or `voucherCode`, e.g. in MongoDB Atlas → Browse Collections: `{ voucherCode: "GRZ-ABC123" }`.
+
 ## Rate limiting
 
 Rate-limit counters are stored in MongoDB (`<collection>_rate_limits`, auto-expiring), so limits are shared across all Vercel function instances. On Vercel the client IP is taken from Vercel's `X-Forwarded-For`; in standalone mode behind a reverse proxy, set `TRUST_PROXY` to the number of proxy hops.

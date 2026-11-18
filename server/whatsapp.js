@@ -1,3 +1,4 @@
+import { logEvent } from "./eventLog.js";
 import { createVoucherPdf } from "./voucherPdf.js";
 
 // WhatsApp Cloud API (Meta). The voucher PDF is uploaded as private media and
@@ -132,7 +133,7 @@ async function sendTemplate(to, mediaId, filename, voucher) {
 export async function sendVoucherWhatsApp(
   collection,
   voucherCode,
-  { force = false } = {},
+  { force = false, trigger = "unknown" } = {},
 ) {
   if (!whatsappConfigured) return "skipped";
 
@@ -164,7 +165,12 @@ export async function sendVoucherWhatsApp(
       { returnDocument: "after" },
     );
   } catch (error) {
-    console.error("WhatsApp send claim failed.", error?.name ?? "Error");
+    await logEvent("whatsapp.send", "failure", {
+      voucherCode,
+      trigger,
+      reason: "claim_failed",
+      error: error?.name ?? "Error",
+    });
     return "retry";
   }
   if (!voucher) return "skipped";
@@ -189,7 +195,11 @@ export async function sendVoucherWhatsApp(
 
   const to = toWhatsAppNumber(voucher.phone);
   if (!to) {
-    console.error("WhatsApp send skipped: invalid phone.", voucherCode);
+    await logEvent("whatsapp.send", "failure", {
+      voucherCode,
+      trigger,
+      reason: "invalid_phone",
+    });
     return finish("failed", { "whatsapp.error": "invalid_phone" });
   }
 
@@ -198,6 +208,12 @@ export async function sendVoucherWhatsApp(
     const pdf = await createVoucherPdf(voucher);
     const mediaId = await uploadPdf(pdf, filename);
     const messageId = await sendTemplate(to, mediaId, filename, voucher);
+    await logEvent("whatsapp.send", "success", {
+      voucherCode,
+      trigger,
+      messageId,
+      attempt: voucher.whatsapp?.attempts,
+    });
     return finish("sent", {
       "whatsapp.messageId": messageId,
       "whatsapp.sentAt": new Date(),
@@ -208,9 +224,16 @@ export async function sendVoucherWhatsApp(
     const errorTag = isApiError
       ? `${error.status || "network"}:${error.code ?? ""}`
       : (error?.name ?? "Error");
+    const status = isApiError && !error.transient ? "failed" : "retry";
     // Only codes are logged; never the phone number or access token.
-    console.error("WhatsApp voucher send failed.", voucherCode, errorTag);
-    return finish(isApiError && !error.transient ? "failed" : "retry", {
+    await logEvent("whatsapp.send", "failure", {
+      voucherCode,
+      trigger,
+      reason: status === "failed" ? "rejected_by_meta" : "temporary_error",
+      error: errorTag,
+      attempt: voucher.whatsapp?.attempts,
+    });
+    return finish(status, {
       "whatsapp.error": errorTag,
     });
   }
