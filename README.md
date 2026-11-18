@@ -16,13 +16,21 @@ Local development uses the `vouchers_dev` collection by default. Production uses
 
 ## Admin voucher management
 
-Open `/admin` to sign in with `ADMIN_PASSWORD`. Search by customer name, phone, or email. Search results are limited to 50 vouchers. Paid vouchers can be redeemed once; redemption atomically changes their status to `redeemed` and records the time in MongoDB. The admin session uses an HttpOnly, SameSite cookie and expires after eight hours.
+Open `/admin` to sign in with `ADMIN_PASSWORD`. Search by customer name, phone, email, or voucher code. Search results are limited to the 50 newest non-expired vouchers. Vouchers expire one year after creation (computed in UTC by `server/voucherExpiry.js`); expired vouchers cannot be redeemed or downloaded. Paid vouchers can be redeemed once; redemption atomically changes their status to `redeemed` and records the time in MongoDB. The admin session uses an HttpOnly, SameSite cookie and expires after eight hours.
 
-## Production
+## PayPal webhook (paid-order recovery)
+
+When an order is created, its amount and buyer details are stored in the `<collection>_pending_orders` collection (auto-deleted after 7 days). Normally the browser captures the payment and the voucher is issued immediately. If the buyer closes the page after approving, or voucher saving fails, PayPal's webhook lets the server capture the order and issue the voucher anyway; it then appears in the admin search.
+
+To enable it, create a webhook in the PayPal developer dashboard (separately for sandbox and live) pointing to `https://<your-domain>/api/webhooks/paypal`, subscribed to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED`, and set its ID as `PAYPAL_WEBHOOK_ID`. Note that events sent from PayPal's webhook simulator cannot be signature-verified; test with a real sandbox purchase.
+
+## Rate limiting
+
+Rate-limit counters are stored in MongoDB (`<collection>_rate_limits`, auto-expiring), so limits are shared across all Vercel function instances. On Vercel the client IP is taken from Vercel's `X-Forwarded-For`; in standalone mode behind a reverse proxy, set `TRUST_PROXY` to the number of proxy hops.
 
 ## Deploying to Vercel
 
-The Express API is in `api/` and is exposed through a catch-all Vercel Function. Vercel builds the Vite frontend as static assets; Express handles `/api/*` requests. Add `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV=live`, `MONGODB_URI`, `ADMIN_PASSWORD`, and `ADMIN_SESSION_SECRET` to the Vercel project environment variables. Generate a unique `ADMIN_SESSION_SECRET` with at least 32 random bytes and keep the same value across deployments/environments so admin sessions remain verifiable across function instances. Optionally set `MONGODB_COLLECTION_PRODUCTION` and `MONGODB_COLLECTION_DEVELOPMENT` on Vercel to override the default collection names. Do not set `PORT`; Vercel manages function ports.
+The Express API is in `api/` and is exposed through a catch-all Vercel Function. Vercel builds the Vite frontend as static assets; Express handles `/api/*` requests. Add `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV=live`, `PAYPAL_WEBHOOK_ID`, `MONGODB_URI`, `ADMIN_PASSWORD`, and `ADMIN_SESSION_SECRET` to the Vercel project environment variables. Generate a unique `ADMIN_SESSION_SECRET` with at least 32 random bytes and keep the same value across deployments/environments so admin sessions remain verifiable across function instances. Optionally set `MONGODB_COLLECTION_PRODUCTION` and `MONGODB_COLLECTION_DEVELOPMENT` on Vercel to override the default collection names. Do not set `PORT`; Vercel manages function ports.
 
 The admin session cookie is Secure by default and is sent only over HTTPS. For local HTTP development only, set `NODE_ENV=development`. Vercel provides HTTPS automatically.
 

@@ -14,6 +14,11 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { MongoClient } from "mongodb";
+import { MongoRateLimitStore } from "../server/mongoRateLimitStore.js";
+import {
+  getPossiblyValidCreatedAfter,
+  isVoucherExpired,
+} from "../server/voucherExpiry.js";
 import { createVoucherPdf } from "../server/voucherPdf.js";
 
 const app = express();
@@ -21,6 +26,15 @@ const port = Number(process.env.PORT) || 3001;
 const paypalEnvironment = process.env.PAYPAL_ENV || "sandbox";
 const paypalClientId = process.env.PAYPAL_CLIENT_ID?.trim();
 const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET?.trim();
+const paypalWebhookId = process.env.PAYPAL_WEBHOOK_ID?.trim();
+// Number of reverse-proxy hops in front of Express. Vercel's edge sets
+// X-Forwarded-For itself, so exactly one hop is trusted there.
+const trustProxyHops =
+  process.env.VERCEL === "1"
+    ? 1
+    : /^\d+$/.test(process.env.TRUST_PROXY ?? "")
+      ? Number(process.env.TRUST_PROXY)
+      : 0;
 const mongoUri = process.env.MONGODB_URI?.trim();
 const adminPassword = process.env.ADMIN_PASSWORD ?? "";
 const configuredAdminSessionSecret = process.env.ADMIN_SESSION_SECRET?.trim();
@@ -36,13 +50,15 @@ const isProductionEnvironment =
 const mongoCollectionName = isProductionEnvironment
   ? process.env.MONGODB_COLLECTION_PRODUCTION?.trim() || "vouchers"
   : process.env.MONGODB_COLLECTION_DEVELOPMENT?.trim() || "vouchers_dev";
+const pendingOrdersCollectionName = `${mongoCollectionName}_pending_orders`;
+const rateLimitsCollectionName = `${mongoCollectionName}_rate_limits`;
 const mongoDnsServers = process.env.MONGODB_DNS_SERVERS?.split(",")
   .map((server) => server.trim())
   .filter(Boolean);
 if (mongoDnsServers?.length) dns.setServers(mongoDnsServers);
 const mongoDatabaseName = getMongoDatabaseName(mongoUri);
 if (
-  mongoCollectionName.length > 120 ||
+  rateLimitsCollectionName.length > 120 ||
   mongoCollectionName.includes("\0") ||
   mongoCollectionName.startsWith("system.")
 ) {
@@ -62,10 +78,31 @@ const AMOUNT_STEP_CENTS = 5000;
 const MAX_AMOUNT_CENTS = 1000000;
 const ORDER_TOKEN_TTL_MS = 30 * 60 * 1000;
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+// How long order details are kept so a PayPal webhook can still issue the
+// voucher if the buyer's browser never completed the capture.
+const PENDING_ORDER_TTL_SECONDS = 7 * 24 * 60 * 60;
+const ADMIN_SEARCH_LIMIT = 50;
+const VOUCHER_CODE_PATTERN =
+  /^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/;
+const ADMIN_VOUCHER_PROJECTION = {
+  _id: 0,
+  voucherCode: 1,
+  name: 1,
+  phone: 1,
+  email: 1,
+  amount: 1,
+  currency: 1,
+  status: 1,
+  source: 1,
+  createdAt: 1,
+  redeemedAt: 1,
+};
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDirectory = path.resolve(dirname, "..", "dist");
 const mongoClient = mongoUri ? new MongoClient(mongoUri) : null;
 let vouchersCollection;
+let pendingOrdersCollection;
+let rateLimitsCollection;
 let mongoInitialization;
 
 function getMongoDatabaseName(uri) {
@@ -87,35 +124,33 @@ class PaymentProviderError extends Error {
   }
 }
 
+const PAYPAL_WEBHOOK_PATH = "/api/webhooks/paypal";
+
+function createRateLimiter(name, windowMs, limit) {
+  return rateLimit({
+    windowMs,
+    limit,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    store: new MongoRateLimitStore(name, async () => {
+      await initializeMongo();
+      return rateLimitsCollection;
+    }),
+  });
+}
+
 app.disable("x-powered-by");
-app.use(express.json({ limit: "10kb" }));
-app.use(
-  "/api/paypal",
-  rateLimit({
-    windowMs: 60 * 1000,
-    limit: 30,
-    standardHeaders: "draft-8",
-    legacyHeaders: false,
-  }),
+app.set("trust proxy", trustProxyHops);
+const parseSmallJson = express.json({ limit: "10kb" });
+app.use((request, response, next) =>
+  // PayPal webhook events can exceed 10kb; that route has its own parser.
+  request.path === PAYPAL_WEBHOOK_PATH
+    ? next()
+    : parseSmallJson(request, response, next),
 );
-app.use(
-  "/api/admin/login",
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 10,
-    standardHeaders: "draft-8",
-    legacyHeaders: false,
-  }),
-);
-app.use(
-  "/api/vouchers",
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 20,
-    standardHeaders: "draft-8",
-    legacyHeaders: false,
-  }),
-);
+app.use("/api/paypal", createRateLimiter("paypal", 60 * 1000, 30));
+app.use("/api/admin/login", createRateLimiter("admin-login", 15 * 60 * 1000, 10));
+app.use("/api/vouchers", createRateLimiter("voucher-pdf", 15 * 60 * 1000, 20));
 app.use(async (_request, _response, next) => {
   try {
     await initializeMongo();
@@ -456,6 +491,130 @@ async function paypalRequest(
   return data;
 }
 
+/**
+ * Captures an approved PayPal order (or reads an already-completed one),
+ * verifies the captured amount, and saves the voucher. Safe to call more than
+ * once for the same order: the capture uses an idempotent PayPal-Request-Id
+ * and the voucher insert is deduplicated by a unique index.
+ *
+ * Returns null when the order cannot become a valid voucher (retrying will not
+ * help), and throws on transient provider or database failures.
+ */
+async function captureAndSaveVoucher(orderId, amountCents, purchase) {
+  const orderPath = `/v2/checkout/orders/${encodeURIComponent(orderId)}`;
+  const approvedOrder = await paypalRequest(orderPath);
+  if (
+    approvedOrder.id !== orderId ||
+    approvedOrder.intent !== "CAPTURE" ||
+    !Array.isArray(approvedOrder.purchase_units) ||
+    approvedOrder.purchase_units.length !== 1
+  ) {
+    console.error("PayPal order verification failed.");
+    return null;
+  }
+
+  let captureOrder = approvedOrder;
+  if (approvedOrder.status === "APPROVED") {
+    const captureRequestId = createHash("sha256")
+      .update(`capture:${orderId}`)
+      .digest("hex")
+      .slice(0, 32);
+    captureOrder = await paypalRequest(`${orderPath}/capture`, {
+      method: "POST",
+      requestId: captureRequestId,
+      body: {},
+    });
+  } else if (approvedOrder.status !== "COMPLETED") {
+    return null;
+  }
+
+  const capture = getVerifiedCapture(captureOrder, amountCents);
+  if (!capture) {
+    console.error("PayPal capture did not match the verified order.");
+    return null;
+  }
+
+  const voucher = await saveVoucher({ orderId, purchase, amountCents });
+  await pendingOrdersCollection.deleteOne({ _id: orderId }).catch(() => {});
+  return { capture, voucher };
+}
+
+async function verifyPaypalWebhook(request) {
+  const header = (name) => request.get(name);
+  const result = await paypalRequest(
+    "/v1/notifications/verify-webhook-signature",
+    {
+      method: "POST",
+      body: {
+        auth_algo: header("paypal-auth-algo"),
+        cert_url: header("paypal-cert-url"),
+        transmission_id: header("paypal-transmission-id"),
+        transmission_sig: header("paypal-transmission-sig"),
+        transmission_time: header("paypal-transmission-time"),
+        webhook_id: paypalWebhookId,
+        webhook_event: request.body,
+      },
+    },
+  );
+  return result?.verification_status === "SUCCESS";
+}
+
+function getWebhookOrderId(event) {
+  if (event?.event_type === "CHECKOUT.ORDER.APPROVED") {
+    return event.resource?.id;
+  }
+  if (event?.event_type === "PAYMENT.CAPTURE.COMPLETED") {
+    return event.resource?.supplementary_data?.related_ids?.order_id;
+  }
+  return undefined;
+}
+
+app.post(
+  PAYPAL_WEBHOOK_PATH,
+  express.json({ limit: "200kb" }),
+  async (request, response) => {
+    if (!paypalConfigured || !paypalWebhookId) {
+      console.error("PayPal webhook received but PAYPAL_WEBHOOK_ID is not set.");
+      return response.sendStatus(503);
+    }
+
+    try {
+      if (!(await verifyPaypalWebhook(request))) {
+        console.error("PayPal webhook signature verification failed.");
+        return response.sendStatus(400);
+      }
+
+      const orderId = getWebhookOrderId(request.body);
+      if (typeof orderId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(orderId)) {
+        return response.sendStatus(200);
+      }
+
+      const pending = await pendingOrdersCollection.findOne({ _id: orderId });
+      if (!pending) {
+        // Already fulfilled by the browser flow, or not one of our orders.
+        return response.sendStatus(200);
+      }
+
+      const result = await captureAndSaveVoucher(
+        orderId,
+        pending.amountCents,
+        pending.purchase,
+      );
+      if (!result) {
+        console.error("PayPal webhook order could not be fulfilled.", orderId);
+      }
+      return response.sendStatus(200);
+    } catch (error) {
+      console.error(
+        "PayPal webhook processing failed.",
+        error instanceof PaymentProviderError ? error.status : error?.name,
+      );
+      // Non-2xx makes PayPal retry the delivery later.
+      return response.sendStatus(500);
+    }
+  },
+);
+
 app.get("/api/paypal/config", (_request, response) => {
   if (!paypalConfigured) return sendPaymentUnavailable(response);
   return response.json({ clientId: paypalClientId });
@@ -494,6 +653,15 @@ app.post("/api/paypal/orders", async (request, response) => {
       return sendPaymentUnavailable(response);
     }
 
+    // Recovery record: lets the PayPal webhook issue the voucher even if the
+    // buyer closes the page before the browser-side capture finishes.
+    await pendingOrdersCollection.insertOne({
+      _id: order.id,
+      amountCents,
+      purchase,
+      createdAt: new Date(),
+    });
+
     return response.status(201).json({
       id: order.id,
       verificationToken: createOrderVerificationToken(
@@ -526,45 +694,13 @@ app.post("/api/paypal/orders/:orderId/capture", async (request, response) => {
   }
 
   try {
-    const orderPath = `/v2/checkout/orders/${encodeURIComponent(orderId)}`;
-    const approvedOrder = await paypalRequest(orderPath);
-    if (
-      approvedOrder.id !== orderId ||
-      approvedOrder.intent !== "CAPTURE" ||
-      !Array.isArray(approvedOrder.purchase_units) ||
-      approvedOrder.purchase_units.length !== 1
-    ) {
-      console.error("PayPal order verification failed.");
-      return sendPaymentUnavailable(response);
-    }
-
-    let captureOrder = approvedOrder;
-    if (approvedOrder.status === "APPROVED") {
-      const captureRequestId = createHash("sha256")
-        .update(`capture:${orderId}`)
-        .digest("hex")
-        .slice(0, 32);
-      captureOrder = await paypalRequest(`${orderPath}/capture`, {
-        method: "POST",
-        requestId: captureRequestId,
-        body: {},
-      });
-    } else if (approvedOrder.status !== "COMPLETED") {
-      return sendPaymentUnavailable(response);
-    }
-
-    const capture = getVerifiedCapture(captureOrder, claims.amountCents);
-    if (!capture) {
-      console.error("PayPal capture did not match the verified order.");
-      return sendPaymentUnavailable(response);
-    }
-
-    const voucher = await saveVoucher({
+    const result = await captureAndSaveVoucher(
       orderId,
+      claims.amountCents,
       purchase,
-      amountCents: claims.amountCents,
-    });
-    return response.json({ ...capture, voucher });
+    );
+    if (!result) return sendPaymentUnavailable(response);
+    return response.json({ ...result.capture, voucher: result.voucher });
   } catch (error) {
     console.error(
       "PayPal capture or voucher persistence failed.",
@@ -677,11 +813,7 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
 
 async function sendVoucherPdf(request, response, requireDownloadToken) {
   const { voucherCode } = request.params;
-  if (
-    !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
-      voucherCode,
-    )
-  ) {
+  if (!VOUCHER_CODE_PATTERN.test(voucherCode)) {
     return response.status(400).json({ error: "קוד השובר אינו תקין." });
   }
 
@@ -703,12 +835,7 @@ async function sendVoucherPdf(request, response, requireDownloadToken) {
       return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
     }
 
-    const expiry = new Date(voucher.createdAt);
-    if (Number.isNaN(expiry.getTime())) {
-      throw new Error("Invalid voucher creation date.");
-    }
-    expiry.setUTCFullYear(expiry.getUTCFullYear() + 1);
-    if (Date.now() >= expiry.getTime()) {
+    if (isVoucherExpired(voucher.createdAt)) {
       return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
     }
 
@@ -743,46 +870,29 @@ app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
   }
 
   const safeSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const now = Date.now();
+  const filter = { createdAt: { $gt: getPossiblyValidCreatedAfter(now) } };
+  if (search) {
+    filter.$or = [
+      { name: { $regex: safeSearch, $options: "i" } },
+      { phone: { $regex: safeSearch, $options: "i" } },
+      { email: { $regex: safeSearch, $options: "i" } },
+      { voucherCode: { $regex: safeSearch, $options: "i" } },
+    ];
+  }
+
   try {
     const vouchers = await vouchersCollection
-      .find(
-        search
-          ? {
-              $or: [
-                { name: { $regex: safeSearch, $options: "i" } },
-                { phone: { $regex: safeSearch, $options: "i" } },
-                { email: { $regex: safeSearch, $options: "i" } },
-                { voucherCode: { $regex: safeSearch, $options: "i" } },
-              ],
-            }
-          : {},
-        {
-          projection: {
-            _id: 0,
-            voucherCode: 1,
-            name: 1,
-            phone: 1,
-            email: 1,
-            amount: 1,
-            currency: 1,
-            status: 1,
-            source: 1,
-            createdAt: 1,
-            redeemedAt: 1,
-          },
-        },
-      )
+      .find(filter, { projection: ADMIN_VOUCHER_PROJECTION })
       .sort({ createdAt: -1 })
+      .limit(ADMIN_SEARCH_LIMIT)
       .toArray();
 
-    const nonExpiredVouchers = vouchers.filter((voucher) => {
-      const createdAt = new Date(voucher.createdAt);
-      const expirationDate = new Date(createdAt);
-      expirationDate.setFullYear(expirationDate.getFullYear() + 1);
-      return new Date() < expirationDate;
+    return response.json({
+      vouchers: vouchers.filter(
+        (voucher) => !isVoucherExpired(voucher.createdAt, now),
+      ),
     });
-
-    return response.json({ vouchers: nonExpiredVouchers });
   } catch (error) {
     console.error("Admin voucher search failed.", error?.name ?? "Error");
     return response.status(500).json({ error: "החיפוש נכשל. נסו שוב." });
@@ -794,206 +904,35 @@ app.patch(
   requireAdmin,
   async (request, response) => {
     const { voucherCode } = request.params;
-    if (
-      !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
-        voucherCode,
-      )
-    ) {
+    if (!VOUCHER_CODE_PATTERN.test(voucherCode)) {
       return response.status(400).json({ error: "קוד השובר אינו תקין." });
     }
 
     try {
-      const redeemedAt = new Date();
-      const update = await vouchersCollection.updateOne(
-        { voucherCode, status: "paid" },
-        { $set: { status: "redeemed", redeemedAt } },
+      const existing = await vouchersCollection.findOne(
+        { voucherCode },
+        { projection: { status: 1, createdAt: 1 } },
       );
-      if (update.modifiedCount !== 1) {
-        const existing = await vouchersCollection.findOne(
-          { voucherCode },
-          { projection: { status: 1 } },
-        );
-        if (!existing)
-          return response.status(404).json({ error: "השובר לא נמצא." });
+      if (!existing) {
+        return response.status(404).json({ error: "השובר לא נמצא." });
+      }
+      if (existing.status !== "paid") {
         return response.status(409).json({ error: "השובר כבר מומש." });
       }
-
-      const voucher = await vouchersCollection.findOne(
-        { voucherCode },
-        {
-          projection: {
-            _id: 0,
-            voucherCode: 1,
-            name: 1,
-            phone: 1,
-            email: 1,
-            amount: 1,
-            currency: 1,
-            status: 1,
-            source: 1,
-            createdAt: 1,
-            redeemedAt: 1,
-          },
-        },
-      );
-      return response.json({ voucher });
-    } catch (error) {
-      console.error("Admin voucher redemption failed.", error?.name ?? "Error");
-      return response
-        .status(500)
-        .json({ error: "לא ניתן לממש את השובר כרגע." });
-    }
-  },
-);
-
-app.post("/api/admin/login", async (request, response) => {
-  if (adminPassword.length < 16 || !adminSessionSecretConfigured) {
-    return response.status(503).json({ error: "שירות הניהול אינו זמין." });
-  }
-
-  const submittedPassword = request.body?.password;
-  if (
-    typeof submittedPassword !== "string" ||
-    submittedPassword.length > 1024
-  ) {
-    return response.status(400).json({ error: "פרטי ההתחברות אינם תקינים." });
-  }
-
-  const expectedPasswordHash = createHash("sha256")
-    .update(adminPassword)
-    .digest();
-  const submittedPasswordHash = createHash("sha256")
-    .update(submittedPassword)
-    .digest();
-  if (!timingSafeEqual(expectedPasswordHash, submittedPasswordHash)) {
-    return response.status(401).json({ error: "הסיסמה שגויה." });
-  }
-
-  const cookieParts = [
-    `gratzia_admin=${encodeURIComponent(createAdminSessionToken())}`,
-    "HttpOnly",
-    "SameSite=Strict",
-    "Path=/api/admin",
-    `Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`,
-  ];
-  if (adminCookieSecure) cookieParts.push("Secure");
-  response.setHeader("Set-Cookie", cookieParts.join("; "));
-  return response.json({ authenticated: true });
-});
-
-app.post("/api/admin/logout", (_request, response) => {
-  response.setHeader(
-    "Set-Cookie",
-    "gratzia_admin=; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=0" +
-      (adminCookieSecure ? "; Secure" : ""),
-  );
-  return response.json({ authenticated: false });
-});
-
-app.get("/api/admin/session", (request, response) => {
-  if (
-    adminPassword.length < 16 ||
-    !mongoClient ||
-    !adminSessionSecretConfigured
-  ) {
-    return response.status(503).json({ error: "שירות הניהול אינו זמין." });
-  }
-  return response.json({
-    authenticated: isValidAdminSession(getCookie(request, "gratzia_admin")),
-  });
-});
-
-app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
-  const search =
-    typeof request.query.q === "string" ? request.query.q.trim() : "";
-  if (search.length > 100) {
-    return response.status(400).json({ error: "החיפוש ארוך מדי." });
-  }
-
-  const safeSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  try {
-    const vouchers = await vouchersCollection
-      .find(
-        search
-          ? {
-              $or: [
-                { name: { $regex: safeSearch, $options: "i" } },
-                { phone: { $regex: safeSearch, $options: "i" } },
-                { email: { $regex: safeSearch, $options: "i" } },
-              ],
-            }
-          : {},
-        {
-          projection: {
-            _id: 0,
-            voucherCode: 1,
-            name: 1,
-            phone: 1,
-            email: 1,
-            amount: 1,
-            currency: 1,
-            status: 1,
-            createdAt: 1,
-            redeemedAt: 1,
-          },
-        },
-      )
-      .sort({ createdAt: -1 })
-      .toArray();
-    return response.json({ vouchers });
-  } catch (error) {
-    console.error("Admin voucher search failed.", error?.name ?? "Error");
-    return response.status(500).json({ error: "החיפוש נכשל. נסו שוב." });
-  }
-});
-
-app.patch(
-  "/api/admin/vouchers/:voucherCode/redeem",
-  requireAdmin,
-  async (request, response) => {
-    const { voucherCode } = request.params;
-    if (
-      !/^GRZ-(?:[A-HJ-NP-Z2-9]{6}|[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4})$/.test(
-        voucherCode,
-      )
-    ) {
-      return response.status(400).json({ error: "קוד השובר אינו תקין." });
-    }
-
-    try {
-      const redeemedAt = new Date();
-      const result = await vouchersCollection.updateOne(
-        { voucherCode, status: "paid" },
-        { $set: { status: "redeemed", redeemedAt } },
-      );
-      if (result.modifiedCount !== 1) {
-        const existing = await vouchersCollection.findOne(
-          { voucherCode },
-          { projection: { status: 1 } },
-        );
-        if (!existing) {
-          return response.status(404).json({ error: "השובר לא נמצא." });
-        }
-        return response.status(409).json({ error: "השובר כבר מומש." });
+      if (isVoucherExpired(existing.createdAt)) {
+        return response.status(410).json({ error: "תוקף השובר פג." });
       }
 
-      const voucher = await vouchersCollection.findOne(
-        { voucherCode },
-        {
-          projection: {
-            _id: 0,
-            voucherCode: 1,
-            name: 1,
-            phone: 1,
-            email: 1,
-            amount: 1,
-            currency: 1,
-            status: 1,
-            createdAt: 1,
-            redeemedAt: 1,
-          },
-        },
+      // The status condition keeps redemption atomic: only one concurrent
+      // request can move the voucher from "paid" to "redeemed".
+      const voucher = await vouchersCollection.findOneAndUpdate(
+        { voucherCode, status: "paid" },
+        { $set: { status: "redeemed", redeemedAt: new Date() } },
+        { projection: ADMIN_VOUCHER_PROJECTION, returnDocument: "after" },
       );
+      if (!voucher) {
+        return response.status(409).json({ error: "השובר כבר מומש." });
+      }
       return response.json({ voucher });
     } catch (error) {
       console.error("Admin voucher redemption failed.", error?.name ?? "Error");
@@ -1049,9 +988,8 @@ async function initializeMongo() {
   if (!mongoInitialization) {
     mongoInitialization = (async () => {
       await mongoClient.connect();
-      const collection = mongoClient
-        .db(mongoDatabaseName)
-        .collection(mongoCollectionName);
+      const database = mongoClient.db(mongoDatabaseName);
+      const collection = database.collection(mongoCollectionName);
       await collection.createIndex(
         { paypalOrderId: 1 },
         { unique: true, name: "unique_paypal_order" },
@@ -1060,12 +998,30 @@ async function initializeMongo() {
         { voucherCode: 1 },
         { unique: true, name: "unique_voucher_code" },
       );
-      return collection;
+      await collection.createIndex({ createdAt: -1 }, { name: "created_at" });
+
+      const pendingOrders = database.collection(pendingOrdersCollectionName);
+      await pendingOrders.createIndex(
+        { createdAt: 1 },
+        { expireAfterSeconds: PENDING_ORDER_TTL_SECONDS, name: "expire_pending" },
+      );
+
+      const rateLimits = database.collection(rateLimitsCollectionName);
+      await rateLimits.createIndex(
+        { resetAt: 1 },
+        { expireAfterSeconds: 0, name: "expire_window" },
+      );
+
+      return { collection, pendingOrders, rateLimits };
     })();
   }
 
   try {
-    vouchersCollection = await mongoInitialization;
+    ({
+      collection: vouchersCollection,
+      pendingOrders: pendingOrdersCollection,
+      rateLimits: rateLimitsCollection,
+    } = await mongoInitialization);
   } catch (error) {
     mongoInitialization = undefined;
     throw error;

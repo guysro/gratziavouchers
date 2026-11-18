@@ -212,6 +212,13 @@ export default function AdminPage() {
         );
         return;
       }
+      if (response.status === 410) {
+        setMessage("תוקף השובר פג ולא ניתן לממש אותו.");
+        setVouchers((current) =>
+          current.filter((voucher) => voucher.voucherCode !== voucherCode),
+        );
+        return;
+      }
       if (!response.ok) throw new Error("Redemption failed");
 
       const result = (await response.json()) as { voucher: AdminVoucher };
