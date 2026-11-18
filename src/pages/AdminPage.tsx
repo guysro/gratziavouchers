@@ -6,7 +6,12 @@ import VoucherAmountField from "../components/forms/VoucherAmountField";
 import BrandHeader from "../components/layout/BrandHeader";
 import VoucherSummary from "../components/payment/VoucherSummary";
 import VoucherTicket from "../components/payment/VoucherTicket";
-import type { AdminVoucher, FormData, FormErrors } from "../types/voucher";
+import type {
+  AdminVoucher,
+  FormData,
+  FormErrors,
+  WhatsAppStatus,
+} from "../types/voucher";
 import {
   formatCurrency,
   MAX_VOUCHER_AMOUNT,
@@ -230,6 +235,47 @@ export default function AdminPage() {
       setMessage("השובר מומש בהצלחה.");
     } catch {
       setMessage("לא ניתן לממש את השובר כרגע.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSendWhatsApp = async (voucherCode: string) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch(
+        `/api/admin/vouchers/${encodeURIComponent(voucherCode)}/whatsapp`,
+        { method: "POST" },
+      );
+      if (response.status === 401) {
+        setAuthenticated(false);
+        setMessage("פג תוקף ההתחברות. יש להתחבר מחדש.");
+        return;
+      }
+      const result = (await response.json().catch(() => null)) as {
+        status?: WhatsAppStatus;
+        error?: string;
+      } | null;
+      if (!response.ok || !result?.status) {
+        setMessage(result?.error ?? "לא ניתן לשלוח בוואטסאפ כרגע.");
+        return;
+      }
+      const status = result.status;
+      setVouchers((current) =>
+        current.map((voucher) =>
+          voucher.voucherCode === voucherCode
+            ? { ...voucher, whatsapp: { status } }
+            : voucher,
+        ),
+      );
+      setMessage(
+        status === "sent"
+          ? "השובר נשלח בוואטסאפ."
+          : "השליחה בוואטסאפ נכשלה. בדקו את מספר הטלפון ונסו שוב.",
+      );
+    } catch {
+      setMessage("לא ניתן לשלוח בוואטסאפ כרגע.");
     } finally {
       setBusy(false);
     }
@@ -579,6 +625,9 @@ export default function AdminPage() {
                       voucher={voucher}
                       busy={busy}
                       onRedeem={setVoucherToRedeem}
+                      onSendWhatsApp={(voucher) =>
+                        void handleSendWhatsApp(voucher.voucherCode)
+                      }
                     />
                   ))}
                 </div>

@@ -24,6 +24,22 @@ When an order is created, its amount and buyer details are stored in the `<colle
 
 To enable it, create a webhook in the PayPal developer dashboard (separately for sandbox and live) pointing to `https://<your-domain>/api/webhooks/paypal`, subscribed to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED`, and set its ID as `PAYPAL_WEBHOOK_ID`. Note that events sent from PayPal's webhook simulator cannot be signature-verified; test with a real sandbox purchase.
 
+## WhatsApp delivery
+
+After a voucher is issued (browser capture, PayPal webhook, or admin creation), the server sends the voucher PDF to the buyer's phone through the Meta WhatsApp Cloud API. The PDF is uploaded as private WhatsApp media; no public link is created. Sending is skipped entirely when the `WHATSAPP_*` variables are not set.
+
+Setup in Meta Business Manager / the Meta developer app:
+
+1. Create a **System User** with access to the WhatsApp Business Account, and generate a permanent token with `whatsapp_business_messaging` permission. Set it as `WHATSAPP_ACCESS_TOKEN`.
+2. Copy the business number's **Phone number ID** (not the phone number itself) into `WHATSAPP_PHONE_NUMBER_ID`.
+3. Create and get approval for a **message template** (category Utility) named as in `WHATSAPP_TEMPLATE_NAME`, in language `WHATSAPP_TEMPLATE_LANGUAGE`, with:
+   - Header: **Document**
+   - Body with exactly two variables: `{{1}}` = customer name, `{{2}}` = voucher code. For example: `שלום {{1}}, תודה על הרכישה! מצורף שובר המתנה שלך, קוד: {{2}}`
+
+Phone numbers starting with `0` get `WHATSAPP_DEFAULT_COUNTRY_CODE` (default `972`); numbers starting with `+` or `00` are used as-is.
+
+The send status is stored on the voucher (`whatsapp.status`: `sent`, `failed`, or `retry`) and shown on the admin page, where a voucher can be sent or resent manually. Sends are deduplicated, so a browser capture and a webhook running at the same time send only one message. If a send fails transiently (network, rate limit, Meta outage), the PayPal webhook responds with an error so PayPal redelivers the event later and the send is retried. Permanent failures (invalid number, template mismatch) are not retried automatically; use the admin page after fixing the cause. `sent` means Meta accepted the message, not that it was delivered.
+
 ## Rate limiting
 
 Rate-limit counters are stored in MongoDB (`<collection>_rate_limits`, auto-expiring), so limits are shared across all Vercel function instances. On Vercel the client IP is taken from Vercel's `X-Forwarded-For`; in standalone mode behind a reverse proxy, set `TRUST_PROXY` to the number of proxy hops.

@@ -42,4 +42,7 @@ export interface AdminVoucher {
   source?: "admin";
   createdAt: string;
   redeemedAt?: string;
+  whatsapp?: { status: WhatsAppStatus };
 }
+
+export type WhatsAppStatus = "sending" | "sent" | "failed" | "retry";

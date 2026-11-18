@@ -20,6 +20,10 @@ import {
   isVoucherExpired,
 } from "../server/voucherExpiry.js";
 import { createVoucherPdf } from "../server/voucherPdf.js";
+import {
+  sendVoucherWhatsApp,
+  whatsappConfigured,
+} from "../server/whatsapp.js";
 
 const app = express();
 const port = Number(process.env.PORT) || 3001;
@@ -96,6 +100,7 @@ const ADMIN_VOUCHER_PROJECTION = {
   source: 1,
   createdAt: 1,
   redeemedAt: 1,
+  "whatsapp.status": 1,
 };
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDirectory = path.resolve(dirname, "..", "dist");
@@ -536,7 +541,11 @@ async function captureAndSaveVoucher(orderId, amountCents, purchase) {
 
   const voucher = await saveVoucher({ orderId, purchase, amountCents });
   await pendingOrdersCollection.deleteOne({ _id: orderId }).catch(() => {});
-  return { capture, voucher };
+  const whatsapp = await sendVoucherWhatsApp(
+    vouchersCollection,
+    voucher.voucherCode,
+  );
+  return { capture, voucher, whatsapp };
 }
 
 async function verifyPaypalWebhook(request) {
@@ -590,20 +599,34 @@ app.post(
       }
 
       const pending = await pendingOrdersCollection.findOne({ _id: orderId });
-      if (!pending) {
-        // Already fulfilled by the browser flow, or not one of our orders.
-        return response.sendStatus(200);
+      let whatsapp;
+      if (pending) {
+        const result = await captureAndSaveVoucher(
+          orderId,
+          pending.amountCents,
+          pending.purchase,
+        );
+        if (!result) {
+          console.error("PayPal webhook order could not be fulfilled.", orderId);
+        }
+        whatsapp = result?.whatsapp;
+      } else {
+        // Already fulfilled by the browser flow (or not one of our orders).
+        // Retry the WhatsApp delivery in case it did not go through there.
+        const voucher = await vouchersCollection.findOne(
+          { paypalOrderId: orderId },
+          { projection: { voucherCode: 1 } },
+        );
+        if (voucher) {
+          whatsapp = await sendVoucherWhatsApp(
+            vouchersCollection,
+            voucher.voucherCode,
+          );
+        }
       }
-
-      const result = await captureAndSaveVoucher(
-        orderId,
-        pending.amountCents,
-        pending.purchase,
-      );
-      if (!result) {
-        console.error("PayPal webhook order could not be fulfilled.", orderId);
-      }
-      return response.sendStatus(200);
+      // A transient WhatsApp failure makes PayPal redeliver the event later,
+      // which retries the send.
+      return response.sendStatus(whatsapp === "retry" ? 500 : 200);
     } catch (error) {
       console.error(
         "PayPal webhook processing failed.",
@@ -792,6 +815,11 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
       }
     }
 
+    const whatsapp = await sendVoucherWhatsApp(
+      vouchersCollection,
+      voucher.voucherCode,
+    );
+
     return response.status(201).json({
       voucher: {
         voucherCode: voucher.voucherCode,
@@ -803,6 +831,7 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
         status: voucher.status,
         source: voucher.source,
         createdAt: voucher.createdAt,
+        ...(whatsapp !== "skipped" && { whatsapp: { status: whatsapp } }),
       },
     });
   } catch (error) {
@@ -810,6 +839,30 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
     return response.status(500).json({ error: "לא ניתן ליצור את השובר כרגע." });
   }
 });
+
+app.post(
+  "/api/admin/vouchers/:voucherCode/whatsapp",
+  requireAdmin,
+  async (request, response) => {
+    const { voucherCode } = request.params;
+    if (!VOUCHER_CODE_PATTERN.test(voucherCode)) {
+      return response.status(400).json({ error: "קוד השובר אינו תקין." });
+    }
+    if (!whatsappConfigured) {
+      return response.status(503).json({ error: "שליחה בוואטסאפ אינה מוגדרת." });
+    }
+
+    const status = await sendVoucherWhatsApp(vouchersCollection, voucherCode, {
+      force: true,
+    });
+    if (status === "skipped") {
+      return response
+        .status(409)
+        .json({ error: "השובר אינו בתוקף או שהשליחה כבר מתבצעת." });
+    }
+    return response.json({ status });
+  },
+);
 
 async function sendVoucherPdf(request, response, requireDownloadToken) {
   const { voucherCode } = request.params;

@@ -1,17 +1,27 @@
-import type { AdminVoucher } from "../../types/voucher";
+import type { AdminVoucher, WhatsAppStatus } from "../../types/voucher";
 import { formatCurrency } from "../../utils/voucher";
+
+const WHATSAPP_STATUS_LABELS: Record<WhatsAppStatus, string> = {
+  sending: "בשליחה",
+  sent: "נשלח",
+  failed: "השליחה נכשלה",
+  retry: "השליחה נכשלה זמנית",
+};
 
 interface AdminVoucherCardProps {
   voucher: AdminVoucher;
   busy: boolean;
   onRedeem: (voucher: AdminVoucher) => void;
+  onSendWhatsApp: (voucher: AdminVoucher) => void;
 }
 
 export default function AdminVoucherCard({
   voucher,
   busy,
   onRedeem,
+  onSendWhatsApp,
 }: AdminVoucherCardProps) {
+  const whatsappStatus = voucher.whatsapp?.status;
   return (
     <article className="admin-voucher">
       <div className="admin-voucher-heading">
@@ -38,6 +48,10 @@ export default function AdminVoucherCard({
             {new Date(voucher.redeemedAt).toLocaleDateString("he-IL")}
           </span>
         )}
+        <span>
+          וואטסאפ:{" "}
+          {whatsappStatus ? WHATSAPP_STATUS_LABELS[whatsappStatus] : "לא נשלח"}
+        </span>
       </div>
       {voucher.status === "paid" && (
         <a
@@ -46,6 +60,18 @@ export default function AdminVoucherCard({
         >
           הורדת השובר
         </a>
+      )}
+      {voucher.status === "paid" && (
+        <button
+          type="button"
+          className="admin-voucher-whatsapp"
+          onClick={() => onSendWhatsApp(voucher)}
+          disabled={busy || whatsappStatus === "sending"}
+        >
+          {whatsappStatus === "sent"
+            ? "שליחה חוזרת בוואטסאפ"
+            : "שליחה בוואטסאפ"}
+        </button>
       )}
       {voucher.status === "paid" && (
         <button
