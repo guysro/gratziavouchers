@@ -29,7 +29,7 @@ jobs:
       # mongodb-memory-server downloads a MongoDB binary on first use; keep it
       # between runs so tests start quickly. Restored after `npm ci`, which
       # clears node_modules.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: node_modules/.cache/mongodb-memory-server
           key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
