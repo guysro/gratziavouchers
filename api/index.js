@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { MongoClient } from "mongodb";
+import { logEvent, setEventLogCollection } from "../server/eventLog.js";
 import { MongoRateLimitStore } from "../server/mongoRateLimitStore.js";
 import {
   getPossiblyValidCreatedAfter,
@@ -56,6 +57,10 @@ const mongoCollectionName = isProductionEnvironment
   : process.env.MONGODB_COLLECTION_DEVELOPMENT?.trim() || "vouchers_dev";
 const pendingOrdersCollectionName = `${mongoCollectionName}_pending_orders`;
 const rateLimitsCollectionName = `${mongoCollectionName}_rate_limits`;
+const logsCollectionName = `${mongoCollectionName}_logs`;
+const LOG_RETENTION_DAYS = /^\d+$/.test(process.env.LOG_RETENTION_DAYS ?? "")
+  ? Math.max(1, Number(process.env.LOG_RETENTION_DAYS))
+  : 180;
 const mongoDnsServers = process.env.MONGODB_DNS_SERVERS?.split(",")
   .map((server) => server.trim())
   .filter(Boolean);
@@ -233,6 +238,12 @@ function requireAdmin(request, response, next) {
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
   if (!isValidAdminSession(getCookie(request, "gratzia_admin"))) {
+    // Usually just an expired session; repeated entries may mean probing.
+    void logEvent("admin.unauthorized", "failure", {
+      method: request.method,
+      path: request.path.slice(0, 200),
+      ip: request.ip,
+    });
     return response.status(401).json({ error: "נדרשת התחברות." });
   }
   return next();
@@ -420,7 +431,7 @@ function serializeVoucher(voucher) {
   };
 }
 
-async function saveVoucher({ orderId, purchase, amountCents }) {
+async function saveVoucher({ orderId, purchase, amountCents, source }) {
   const existing = await vouchersCollection.findOne({ paypalOrderId: orderId });
   if (existing) return serializeVoucher(existing);
 
@@ -438,6 +449,12 @@ async function saveVoucher({ orderId, purchase, amountCents }) {
 
     try {
       await vouchersCollection.insertOne(voucher);
+      await logEvent("voucher.issue", "success", {
+        source,
+        orderId,
+        voucherCode: voucher.voucherCode,
+        amount: voucher.amount,
+      });
       return serializeVoucher(voucher);
     } catch (error) {
       if (error?.code !== 11000) throw error;
@@ -505,7 +522,18 @@ async function paypalRequest(
  * Returns null when the order cannot become a valid voucher (retrying will not
  * help), and throws on transient provider or database failures.
  */
-async function captureAndSaveVoucher(orderId, amountCents, purchase) {
+async function captureAndSaveVoucher(orderId, amountCents, purchase, source) {
+  const fail = async (reason, details = {}) => {
+    await logEvent("paypal.capture", "failure", {
+      source,
+      orderId,
+      amount: amountCents / 100,
+      reason,
+      ...details,
+    });
+    return null;
+  };
+
   const orderPath = `/v2/checkout/orders/${encodeURIComponent(orderId)}`;
   const approvedOrder = await paypalRequest(orderPath);
   if (
@@ -514,8 +542,7 @@ async function captureAndSaveVoucher(orderId, amountCents, purchase) {
     !Array.isArray(approvedOrder.purchase_units) ||
     approvedOrder.purchase_units.length !== 1
   ) {
-    console.error("PayPal order verification failed.");
-    return null;
+    return fail("order_verification_failed");
   }
 
   let captureOrder = approvedOrder;
@@ -530,22 +557,39 @@ async function captureAndSaveVoucher(orderId, amountCents, purchase) {
       body: {},
     });
   } else if (approvedOrder.status !== "COMPLETED") {
-    return null;
+    return fail("order_not_approved", { orderStatus: approvedOrder.status });
   }
 
   const capture = getVerifiedCapture(captureOrder, amountCents);
   if (!capture) {
-    console.error("PayPal capture did not match the verified order.");
-    return null;
+    // e.g. captureStatus "PENDING" when PayPal holds the payment for review
+    // or for a currency the account does not accept automatically.
+    return fail("capture_not_completed", {
+      orderStatus: captureOrder?.status,
+      captureStatus:
+        captureOrder?.purchase_units?.[0]?.payments?.captures?.[0]?.status,
+    });
   }
 
-  const voucher = await saveVoucher({ orderId, purchase, amountCents });
+  const voucher = await saveVoucher({ orderId, purchase, amountCents, source });
   await pendingOrdersCollection.deleteOne({ _id: orderId }).catch(() => {});
+  await logEvent("paypal.capture", "success", {
+    source,
+    orderId,
+    voucherCode: voucher.voucherCode,
+    amount: capture.amount,
+  });
   const whatsapp = await sendVoucherWhatsApp(
     vouchersCollection,
     voucher.voucherCode,
+    { trigger: source },
   );
   return { capture, voucher, whatsapp };
+}
+
+function getErrorTag(error) {
+  if (error instanceof PaymentProviderError) return `paypal_${error.status}`;
+  return error?.name ?? "Error";
 }
 
 async function verifyPaypalWebhook(request) {
@@ -582,19 +626,35 @@ app.post(
   PAYPAL_WEBHOOK_PATH,
   express.json({ limit: "200kb" }),
   async (request, response) => {
+    const eventType =
+      typeof request.body?.event_type === "string"
+        ? request.body.event_type.slice(0, 100)
+        : undefined;
     if (!paypalConfigured || !paypalWebhookId) {
-      console.error("PayPal webhook received but PAYPAL_WEBHOOK_ID is not set.");
+      await logEvent("paypal.webhook", "failure", {
+        eventType,
+        reason: "webhook_not_configured",
+      });
       return response.sendStatus(503);
     }
 
+    let orderId;
     try {
       if (!(await verifyPaypalWebhook(request))) {
-        console.error("PayPal webhook signature verification failed.");
+        await logEvent("paypal.webhook", "failure", {
+          eventType,
+          reason: "invalid_signature",
+          ip: request.ip,
+        });
         return response.sendStatus(400);
       }
 
-      const orderId = getWebhookOrderId(request.body);
+      orderId = getWebhookOrderId(request.body);
       if (typeof orderId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(orderId)) {
+        await logEvent("paypal.webhook", "success", {
+          eventType,
+          result: "ignored",
+        });
         return response.sendStatus(200);
       }
 
@@ -605,10 +665,13 @@ app.post(
           orderId,
           pending.amountCents,
           pending.purchase,
+          "webhook",
         );
-        if (!result) {
-          console.error("PayPal webhook order could not be fulfilled.", orderId);
-        }
+        await logEvent("paypal.webhook", result ? "success" : "failure", {
+          eventType,
+          orderId,
+          result: result ? "fulfilled" : "not_fulfillable",
+        });
         whatsapp = result?.whatsapp;
       } else {
         // Already fulfilled by the browser flow (or not one of our orders).
@@ -621,17 +684,25 @@ app.post(
           whatsapp = await sendVoucherWhatsApp(
             vouchersCollection,
             voucher.voucherCode,
+            { trigger: "webhook" },
           );
         }
+        await logEvent("paypal.webhook", "success", {
+          eventType,
+          orderId,
+          result: voucher ? "already_fulfilled" : "unknown_order",
+        });
       }
       // A transient WhatsApp failure makes PayPal redeliver the event later,
       // which retries the send.
       return response.sendStatus(whatsapp === "retry" ? 500 : 200);
     } catch (error) {
-      console.error(
-        "PayPal webhook processing failed.",
-        error instanceof PaymentProviderError ? error.status : error?.name,
-      );
+      await logEvent("paypal.webhook", "failure", {
+        eventType,
+        orderId,
+        reason: "processing_error",
+        error: getErrorTag(error),
+      });
       // Non-2xx makes PayPal retry the delivery later.
       return response.sendStatus(500);
     }
@@ -647,6 +718,10 @@ app.post("/api/paypal/orders", async (request, response) => {
   const amountCents = getAmountCents(request.body?.amount);
   const purchase = normalizePurchase(request.body?.purchase);
   if (amountCents === null || !purchase) {
+    await logEvent("paypal.order.create", "failure", {
+      reason: "invalid_request",
+      ip: request.ip,
+    });
     return response.status(400).json({ error: "בקשת התשלום אינה תקינה." });
   }
 
@@ -672,7 +747,11 @@ app.post("/api/paypal/orders", async (request, response) => {
     });
 
     if (typeof order.id !== "string" || order.status !== "CREATED") {
-      console.error("PayPal order creation returned an unexpected response.");
+      await logEvent("paypal.order.create", "failure", {
+        amount: amountCents / 100,
+        reason: "unexpected_response",
+        orderStatus: order.status,
+      });
       return sendPaymentUnavailable(response);
     }
 
@@ -684,6 +763,10 @@ app.post("/api/paypal/orders", async (request, response) => {
       purchase,
       createdAt: new Date(),
     });
+    await logEvent("paypal.order.create", "success", {
+      orderId: order.id,
+      amount: amountCents / 100,
+    });
 
     return response.status(201).json({
       id: order.id,
@@ -694,10 +777,11 @@ app.post("/api/paypal/orders", async (request, response) => {
       ),
     });
   } catch (error) {
-    console.error(
-      "PayPal order creation failed.",
-      error instanceof PaymentProviderError ? error.status : "network error",
-    );
+    await logEvent("paypal.order.create", "failure", {
+      amount: amountCents / 100,
+      reason: "provider_or_database_error",
+      error: getErrorTag(error),
+    });
     return sendPaymentUnavailable(response);
   }
 });
@@ -707,12 +791,23 @@ app.post("/api/paypal/orders/:orderId/capture", async (request, response) => {
 
   const { orderId } = request.params;
   if (!/^[A-Za-z0-9-]{1,128}$/.test(orderId)) {
+    await logEvent("paypal.capture", "failure", {
+      source: "browser",
+      reason: "invalid_order_id",
+      ip: request.ip,
+    });
     return response.status(400).json({ error: "לא ניתן לעבד את התשלום." });
   }
 
   const claims = verifyOrderToken(orderId, request.body?.verificationToken);
   const purchase = normalizePurchase(request.body?.purchase);
   if (!claims || !purchase || hashPurchase(purchase) !== claims.purchaseHash) {
+    await logEvent("paypal.capture", "failure", {
+      source: "browser",
+      orderId,
+      reason: claims ? "purchase_details_mismatch" : "invalid_or_expired_token",
+      ip: request.ip,
+    });
     return sendPaymentUnavailable(response);
   }
 
@@ -721,36 +816,53 @@ app.post("/api/paypal/orders/:orderId/capture", async (request, response) => {
       orderId,
       claims.amountCents,
       purchase,
+      "browser",
     );
     if (!result) return sendPaymentUnavailable(response);
     return response.json({ ...result.capture, voucher: result.voucher });
   } catch (error) {
-    console.error(
-      "PayPal capture or voucher persistence failed.",
-      error instanceof PaymentProviderError ? error.status : "network error",
-    );
+    await logEvent("paypal.capture", "failure", {
+      source: "browser",
+      orderId,
+      amount: claims.amountCents / 100,
+      reason: "provider_or_database_error",
+      error: getErrorTag(error),
+    });
     return sendPaymentUnavailable(response);
   }
 });
 
-app.post("/api/admin/login", (request, response) => {
+app.post("/api/admin/login", async (request, response) => {
   if (
     adminPassword.length < 16 ||
     !mongoClient ||
     !adminSessionSecretConfigured
   ) {
+    await logEvent("admin.login", "failure", {
+      reason: "admin_not_configured",
+      ip: request.ip,
+    });
     return response.status(503).json({ error: "שירות הניהול אינו זמין." });
   }
   const password = request.body?.password;
   if (typeof password !== "string" || password.length > 1024) {
+    await logEvent("admin.login", "failure", {
+      reason: "invalid_request",
+      ip: request.ip,
+    });
     return response.status(400).json({ error: "פרטי ההתחברות אינם תקינים." });
   }
 
   const expected = createHash("sha256").update(adminPassword).digest();
   const received = createHash("sha256").update(password).digest();
   if (!timingSafeEqual(expected, received)) {
+    await logEvent("admin.login", "failure", {
+      reason: "wrong_password",
+      ip: request.ip,
+    });
     return response.status(401).json({ error: "הסיסמה שגויה." });
   }
+  await logEvent("admin.login", "success", { ip: request.ip });
 
   const cookie = [
     `gratzia_admin=${encodeURIComponent(createAdminSessionToken())}`,
@@ -764,7 +876,11 @@ app.post("/api/admin/login", (request, response) => {
   return response.json({ authenticated: true });
 });
 
-app.post("/api/admin/logout", (_request, response) => {
+app.post("/api/admin/logout", async (request, response) => {
+  await logEvent("admin.logout", "success", {
+    ip: request.ip,
+    hadSession: isValidAdminSession(getCookie(request, "gratzia_admin")),
+  });
   const cookie =
     "gratzia_admin=; HttpOnly; SameSite=Strict; Path=/api/admin; Max-Age=0" +
     (adminCookieSecure ? "; Secure" : "");
@@ -789,6 +905,10 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
   const purchase = normalizePurchase(request.body);
   const amountCents = getAmountCents(request.body?.amount);
   if (!purchase || amountCents === null) {
+    await logEvent("admin.voucher.create", "failure", {
+      reason: "invalid_request",
+      ip: request.ip,
+    });
     return response.status(400).json({ error: "פרטי השובר אינם תקינים." });
   }
 
@@ -815,9 +935,15 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
       }
     }
 
+    await logEvent("admin.voucher.create", "success", {
+      voucherCode: voucher.voucherCode,
+      amount: voucher.amount,
+      ip: request.ip,
+    });
     const whatsapp = await sendVoucherWhatsApp(
       vouchersCollection,
       voucher.voucherCode,
+      { trigger: "admin_create" },
     );
 
     return response.status(201).json({
@@ -835,7 +961,12 @@ app.post("/api/admin/vouchers", requireAdmin, async (request, response) => {
       },
     });
   } catch (error) {
-    console.error("Admin voucher creation failed.", error?.name ?? "Error");
+    await logEvent("admin.voucher.create", "failure", {
+      amount: amountCents / 100,
+      reason: "database_error",
+      error: getErrorTag(error),
+      ip: request.ip,
+    });
     return response.status(500).json({ error: "לא ניתן ליצור את השובר כרגע." });
   }
 });
@@ -852,9 +983,16 @@ app.post(
       return response.status(503).json({ error: "שליחה בוואטסאפ אינה מוגדרת." });
     }
 
+    // The send itself is logged as "whatsapp.send"; this records who asked.
     const status = await sendVoucherWhatsApp(vouchersCollection, voucherCode, {
       force: true,
+      trigger: "admin_resend",
     });
+    await logEvent(
+      "admin.whatsapp.resend",
+      status === "sent" ? "success" : "failure",
+      { voucherCode, result: status, ip: request.ip },
+    );
     if (status === "skipped") {
       return response
         .status(409)
@@ -866,7 +1004,19 @@ app.post(
 
 async function sendVoucherPdf(request, response, requireDownloadToken) {
   const { voucherCode } = request.params;
+  const event = requireDownloadToken
+    ? "voucher.pdf.download"
+    : "admin.voucher.pdf.download";
+  const notFound = async (reason) => {
+    await logEvent(event, "failure", { voucherCode, reason, ip: request.ip });
+    return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
+  };
+
   if (!VOUCHER_CODE_PATTERN.test(voucherCode)) {
+    await logEvent(event, "failure", {
+      reason: "invalid_voucher_code",
+      ip: request.ip,
+    });
     return response.status(400).json({ error: "קוד השובר אינו תקין." });
   }
 
@@ -875,9 +1025,7 @@ async function sendVoucherPdf(request, response, requireDownloadToken) {
       voucherCode,
       status: "paid",
     });
-    if (!voucher) {
-      return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
-    }
+    if (!voucher) return notFound("not_found_or_redeemed");
     if (
       requireDownloadToken &&
       !isValidVoucherDownloadToken(
@@ -885,14 +1033,13 @@ async function sendVoucherPdf(request, response, requireDownloadToken) {
         request.get("authorization")?.match(/^Bearer ([A-Za-z0-9_-]+)$/i)?.[1],
       )
     ) {
-      return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
+      return notFound("invalid_download_token");
     }
 
-    if (isVoucherExpired(voucher.createdAt)) {
-      return response.status(404).json({ error: "השובר לא נמצא או שפג תוקפו." });
-    }
+    if (isVoucherExpired(voucher.createdAt)) return notFound("expired");
 
     const pdf = await createVoucherPdf(voucher);
+    await logEvent(event, "success", { voucherCode, ip: request.ip });
     response.set({
       "Cache-Control": "private, no-store",
       "Content-Disposition": `attachment; filename="voucher-${voucherCode}.pdf"`,
@@ -900,7 +1047,12 @@ async function sendVoucherPdf(request, response, requireDownloadToken) {
     });
     return response.send(Buffer.from(pdf));
   } catch (error) {
-    console.error("Voucher PDF generation failed.", error?.name ?? "Error");
+    await logEvent(event, "failure", {
+      voucherCode,
+      reason: "pdf_generation_error",
+      error: getErrorTag(error),
+      ip: request.ip,
+    });
     return response.status(500).json({ error: "לא ניתן להכין את השובר כרגע." });
   }
 }
@@ -947,7 +1099,13 @@ app.get("/api/admin/vouchers", requireAdmin, async (request, response) => {
       ),
     });
   } catch (error) {
-    console.error("Admin voucher search failed.", error?.name ?? "Error");
+    // Successful searches are not logged: they run on every keystroke and
+    // the search text may contain customer details.
+    await logEvent("admin.voucher.search", "failure", {
+      reason: "database_error",
+      error: getErrorTag(error),
+      ip: request.ip,
+    });
     return response.status(500).json({ error: "החיפוש נכשל. נסו שוב." });
   }
 });
@@ -957,8 +1115,16 @@ app.patch(
   requireAdmin,
   async (request, response) => {
     const { voucherCode } = request.params;
+    const fail = async (status, reason, error) => {
+      await logEvent("admin.voucher.redeem", "failure", {
+        voucherCode,
+        reason,
+        ip: request.ip,
+      });
+      return response.status(status).json({ error });
+    };
     if (!VOUCHER_CODE_PATTERN.test(voucherCode)) {
-      return response.status(400).json({ error: "קוד השובר אינו תקין." });
+      return fail(400, "invalid_voucher_code", "קוד השובר אינו תקין.");
     }
 
     try {
@@ -966,14 +1132,12 @@ app.patch(
         { voucherCode },
         { projection: { status: 1, createdAt: 1 } },
       );
-      if (!existing) {
-        return response.status(404).json({ error: "השובר לא נמצא." });
-      }
+      if (!existing) return fail(404, "not_found", "השובר לא נמצא.");
       if (existing.status !== "paid") {
-        return response.status(409).json({ error: "השובר כבר מומש." });
+        return fail(409, "already_redeemed", "השובר כבר מומש.");
       }
       if (isVoucherExpired(existing.createdAt)) {
-        return response.status(410).json({ error: "תוקף השובר פג." });
+        return fail(410, "expired", "תוקף השובר פג.");
       }
 
       // The status condition keeps redemption atomic: only one concurrent
@@ -983,12 +1147,20 @@ app.patch(
         { $set: { status: "redeemed", redeemedAt: new Date() } },
         { projection: ADMIN_VOUCHER_PROJECTION, returnDocument: "after" },
       );
-      if (!voucher) {
-        return response.status(409).json({ error: "השובר כבר מומש." });
-      }
+      if (!voucher) return fail(409, "already_redeemed", "השובר כבר מומש.");
+      await logEvent("admin.voucher.redeem", "success", {
+        voucherCode,
+        amount: voucher.amount,
+        ip: request.ip,
+      });
       return response.json({ voucher });
     } catch (error) {
-      console.error("Admin voucher redemption failed.", error?.name ?? "Error");
+      await logEvent("admin.voucher.redeem", "failure", {
+        voucherCode,
+        reason: "database_error",
+        error: getErrorTag(error),
+        ip: request.ip,
+      });
       return response
         .status(500)
         .json({ error: "לא ניתן לממש את השובר כרגע." });
@@ -1013,11 +1185,15 @@ if (process.env.VERCEL !== "1") {
   });
 }
 
-app.use((error, _request, response, _next) => {
+app.use(async (error, request, response, _next) => {
   if (error instanceof SyntaxError && "body" in error) {
     return response.status(400).json({ error: "Invalid request" });
   }
-  console.error("Unhandled server error.");
+  await logEvent("server.error", "failure", {
+    method: request.method,
+    path: request.path.slice(0, 200),
+    error: getErrorTag(error),
+  });
   return sendPaymentUnavailable(response);
 });
 
@@ -1064,6 +1240,33 @@ async function initializeMongo() {
         { resetAt: 1 },
         { expireAfterSeconds: 0, name: "expire_window" },
       );
+
+      const logs = database.collection(logsCollectionName);
+      await logs
+        .createIndex(
+          { at: 1 },
+          {
+            expireAfterSeconds: LOG_RETENTION_DAYS * 24 * 60 * 60,
+            name: "expire_logs",
+          },
+        )
+        .catch(async (error) => {
+          // IndexOptionsConflict: the retention period was changed.
+          if (error?.code !== 85) throw error;
+          await database.command({
+            collMod: logsCollectionName,
+            index: {
+              name: "expire_logs",
+              expireAfterSeconds: LOG_RETENTION_DAYS * 24 * 60 * 60,
+            },
+          });
+        })
+        .then(() => logs.createIndex({ event: 1, at: -1 }, { name: "event_at" }))
+        // Logging is still useful without its indexes; never block startup.
+        .catch((error) =>
+          console.error("Log index setup failed.", error?.codeName ?? error?.name),
+        );
+      setEventLogCollection(logs);
 
       return { collection, pendingOrders, rateLimits };
     })();
